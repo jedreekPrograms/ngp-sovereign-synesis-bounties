@@ -1,0 +1,62 @@
+name: Bounty Acceptance CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test-bounty-1:
+    name: "Bounty #1 — DunedinPACE Pipeline"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install pytest scipy numpy pandas
+      - name: Run Bounty 1 tests
+        run: pytest tests/test_bounty1_pace.py -v --tb=short
+        continue-on-error: true
+
+  test-bounty-2:
+    name: "Bounty #2 — FCQC Simulator"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install pytest numpy
+      - name: Run Bounty 2 tests
+        run: pytest tests/test_bounty2_physics.py -v --tb=short
+        continue-on-error: true
+
+  test-bounty-3:
+    name: "Bounty #3 — SiLA 2 Bridge"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install pytest grpcio
+      - name: Run Bounty 3 unit tests (no Docker)
+        run: pytest tests/test_bounty3_sila2.py -v --tb=short -m "not integration"
+        continue-on-error: true
+
+  lint:
+    name: "Code Quality"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ruff
+        run: pip install ruff
+      - name: Lint test suite
+        run: ruff check tests/
