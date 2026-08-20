@@ -1,5 +1,5 @@
 """
-Automated acceptance tests for Bounty #2: Karabut–FCQC Physical Simulator.
+Automated acceptance tests for Bounty #2: Karabut Glow-Discharge Nuclear Screening Simulator.
 Run: pytest tests/test_bounty2_physics.py -v
 """
 import json

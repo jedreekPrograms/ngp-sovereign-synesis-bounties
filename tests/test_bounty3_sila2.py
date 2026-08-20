@@ -12,7 +12,7 @@ import pytest
 MANIFEST = pathlib.Path("results/sila2_manifest.json")
 
 GRPC_LATENCY_P99_MS_MAX = 50.0
-MASTER_CLOCK_HZ = 432
+PTP_UTC_OFFSET_MAX_MS = 1.0  # IEEE 1588 PTP vs GPS-disciplined UTC reference
 CLOCK_JITTER_MAX_MS = 1.0
 DRYLAB4_RT_ERROR_MAX_FRACTION = 0.02  # 2%
 ICH_Q14_REQUIRED_FIELDS = {"actor", "timestamp", "delta", "operation_id"}
@@ -70,16 +70,13 @@ def test_drylab4_rt_prediction(manifest):
 
 
 # ---------------------------------------------------------------------------
-# Test 4: 432 Hz master clock jitter < 1 ms over 60 seconds
+# Test 4: IEEE 1588 PTP clock offset < 1 ms vs. GPS-disciplined UTC reference
 # ---------------------------------------------------------------------------
 def test_master_clock_jitter(manifest):
     clock_data = manifest["master_clock"]
-    assert clock_data["frequency_hz"] == MASTER_CLOCK_HZ, (
-        f"Master clock frequency {clock_data['frequency_hz']} Hz ≠ {MASTER_CLOCK_HZ} Hz"
-    )
-    jitter_ms = clock_data["jitter_ms_60s_window"]
-    assert jitter_ms < CLOCK_JITTER_MAX_MS, (
-        f"Clock jitter {jitter_ms:.3f} ms ≥ {CLOCK_JITTER_MAX_MS} ms over 60-second window"
+    utc_offset_ms = clock_data.get("utc_offset_ms", clock_data.get("jitter_ms_60s_window"))
+    assert utc_offset_ms < PTP_UTC_OFFSET_MAX_MS, (
+        f"PTP UTC offset {utc_offset_ms:.3f} ms ≥ {PTP_UTC_OFFSET_MAX_MS} ms (IEEE 1588 requirement)"
     )
 
 

@@ -1,18 +1,17 @@
-# NGP 3.0 Sovereign Synesis — Open DeSci Bounty Program
+# Sovereign Synesis — Open DeSci Bounty Program
 
 > **Total Prize Pool: $60,000 USDC**  
-> Protocol: NetGlyph Knowledge Protocol (NGP) · Issuer: Syn Research Lab  
-> License: CC BY 4.0 · Contact: research@syn.ai
+> Issuer: Syn Research Lab · License: CC BY 4.0 · Contact: research@syn.ai
 
 ---
 
 ## Overview
 
-The **Sovereign Synesis Bounty Program** is an open, permissionless research initiative governed by the NGP 3.0 decentralized knowledge protocol. We are funding three high-priority scientific engineering tasks at the intersection of longevity epigenomics, low-energy nuclear reaction (LENR) physics, and robotic laboratory automation.
+The **Sovereign Synesis Bounty Program** funds three high-priority scientific engineering tasks at the intersection of longevity epigenomics, anomalous nuclear reaction physics, and robotic laboratory automation.
 
-All submissions are evaluated by an on-chain peer-review committee. Acceptance criteria are deterministic and mathematically specified — reviewers execute automated test suites against submitted artifacts. Partial credit is awarded pro-rata for demonstrably reproducible intermediate results.
+All submissions are evaluated by a scientific review committee. Acceptance criteria are deterministic and mathematically specified — reviewers execute automated test suites against submitted artifacts. Partial credit is awarded pro-rata for demonstrably reproducible intermediate results.
 
-**Funding is disbursed via USDC on Ethereum mainnet (ERC-20)** within 14 days of committee ratification.
+**Funding is disbursed via USDC** within 14 days of committee ratification.
 
 ---
 
@@ -21,7 +20,7 @@ All submissions are evaluated by an on-chain peer-review committee. Acceptance c
 | # | Title | Reward | Status |
 |---|-------|--------|--------|
 | [1](../../issues/1) | ChIP-seq & Methylation PACE Pipeline | **$15,000 USDC** | 🟢 Open |
-| [2](../../issues/2) | Karabut–FCQC Physical Simulator | **$25,000 USDC** | 🟢 Open |
+| [2](../../issues/2) | Karabut Glow-Discharge Nuclear Screening Simulator | **$25,000 USDC** | 🟢 Open |
 | [3](../../issues/3) | DryLab4 & SiLA 2 Robotic Bridge | **$20,000 USDC** | 🟢 Open |
 
 ---
@@ -61,11 +60,11 @@ Construct a fully reproducible, containerized bioinformatics pipeline that:
 
 ---
 
-## Bounty #2 — Karabut–FCQC Physical Simulator ($25,000 USDC)
+## Bounty #2 — Karabut Glow-Discharge Nuclear Screening Simulator ($25,000 USDC)
 
 ### Scientific Context
 
-Alexander Karabut's glow-discharge experiments (IAEA Technical Reports, 1995–2004) reported anomalous soft X-ray emission (Hg-201 line at **1564.8 keV**) and excess heat in deuterium-loaded Pd cathodes. Holmlid & Zeiner-Gundersen (2019, *Int. J. Hydrogen Energy*) characterized **Deuterium(0)** — an ultra-dense hydrogen isotopologue with internuclear distance **d = 2.3 pm** — as a candidate precursor for LENR. The Fractional Charge Quantum Coherence (FCQC) hypothesis proposes that quasi-free electrons in sub-Ångström geometries enable nuclear screening sufficient for sub-Coulomb-barrier fusion.
+Alexander Karabut's glow-discharge experiments (IAEA Technical Reports, 1995–2004) reported anomalous soft X-ray emission (Hg-201 line at **1564.8 keV**) and excess heat in deuterium-loaded Pd cathodes — results independently reviewed in the DoE 2004 low-energy nuclear reaction (LENR) assessment. Holmlid & Zeiner-Gundersen (2019, *Int. J. Hydrogen Energy*) characterized **Deuterium(0)** — an ultra-dense hydrogen isotopologue with internuclear distance **d = 2.3 pm** — via time-of-flight mass spectrometry. The sub-Ångström electron screening model proposes that high electron density at lattice defect sites reduces the effective Coulomb barrier, a mechanism consistent with Coulomb barrier suppression calculations in condensed-matter nuclear science.
 
 ### Objective
 
@@ -110,7 +109,7 @@ Deliver a production-ready middleware layer that:
 1. Exposes Hamilton Microlab STARlet as a **SiLA 2 Feature** (gRPC service with `.proto` definition conforming to SiLA 2 v1.0.0).
 2. Bridges DryLab4 method predictions to automated HPLC runs via the SiLA 2 transport, synchronizing method parameters bi-directionally.
 3. Integrates result acquisition from **Waters Empower** or **Agilent OpenLab CDS** into a unified run record.
-4. Synchronizes all instrument clocks and log timestamps to a **432 Hz master clock** reference (derived from UTC via NTP + PPS GPS disciplined oscillator or equivalent).
+4. Synchronizes all instrument clocks and log timestamps via **IEEE 1588 Precision Time Protocol (PTP)** to a GPS-disciplined UTC reference (< 1 ms absolute offset).
 5. Complies with **ICH Q14** analytical procedure development guidelines for data integrity and audit trail requirements.
 
 ### Acceptance Criteria (Automated CI)
@@ -119,7 +118,7 @@ Deliver a production-ready middleware layer that:
 ✅ SiLA 2 Feature descriptor validates against SiLA2 XML schema (xsd validator)
 ✅ gRPC roundtrip latency < 50 ms on localhost (p99, 1000 iterations)
 ✅ DryLab4 → SiLA2 parameter mapping: retention-time prediction error < 2% vs. reference run
-✅ 432 Hz master clock: timestamp jitter < 1 ms over 60-second window
+✅ IEEE 1588 PTP synchronization: timestamp offset < 1 ms vs. GPS-disciplined UTC reference
 ✅ ICH Q14 audit trail: all write operations produce immutable log entry with actor, timestamp, delta
 ✅ End-to-end integration test: mock STARlet → DryLab4 → mock CDS completes without error
 ✅ Docker Compose stack starts cleanly: `docker compose up --wait` exits 0
@@ -162,8 +161,8 @@ Committee seats are open. Apply by opening an Issue with label `committee-applic
 - Holmlid, L. & Zeiner-Gundersen, S. (2019). Ultradense protium p(0) and deuterium D(0) and their relation to ordinary Rydberg matter. *Physica Scripta*, 74.
 - SiLA 2 Consortium (2020). SiLA 2 Core Standard v1.0.0. https://sila-standard.com
 - ICH Q14 (2023). Analytical Procedure Development. International Council for Harmonisation.
-- NGP 3.0 Protocol Specification (2026). Syn Research Lab. Internal document.
+- U.S. DoE (2004). Report of the Review of Low Energy Nuclear Reactions. U.S. Department of Energy.
 
 ---
 
-*This bounty program is governed by the NGP 3.0 Decentralized Knowledge Protocol. All accepted submissions are minted as Glyphs in the NGP knowledge graph and attributed permanently to their authors on-chain.*
+*Submissions accepted under CC BY 4.0. Authors retain full rights to their work. Syn Research Lab reserves the right to include accepted results in aggregated research publications with appropriate attribution.*
