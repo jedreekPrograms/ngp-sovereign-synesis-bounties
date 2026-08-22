@@ -15,7 +15,7 @@ def _write_fastq(path, mate, count=5):
         for i in range(count):
             name = f'@read{i}/{mate}\n'.encode()
             seq = (b'ACGT' if mate == 1 else b'TGCA') + b'ACGT\n'
-            qual = b'I' * (len(seq.rstrip())) + b'\n'
+            qual = b'I' * len(seq.rstrip()) + b'\n'
             handle.write(name)
             handle.write(seq)
             handle.write(b'+\n')
@@ -40,11 +40,7 @@ def test_extract_local_file_urls_preserves_pairs_and_limit(tmp_path):
     assert _count_records(out1) == 3
     assert _count_records(out2) == 3
     with gzip.open(out1, 'rt') as h1, gzip.open(out2, 'rt') as h2:
-        names1 = [h1.readline().strip() for _ in range(3) for __ in [0] if not [h1.readline(), h1.readline(), h1.readline()]]
-        # The compact comprehension above is intentionally not used for pair
-        # comparison; reopen and read records explicitly for clarity below.
-    with gzip.open(out1, 'rt') as h1, gzip.open(out2, 'rt') as h2:
-        for i in range(3):
+        for _ in range(3):
             r1 = [h1.readline() for _ in range(4)]
             r2 = [h2.readline() for _ in range(4)]
             assert module.normalise_read_name(r1[0].encode()) == module.normalise_read_name(r2[0].encode())
