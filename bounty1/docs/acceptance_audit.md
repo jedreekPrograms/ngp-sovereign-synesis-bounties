@@ -115,3 +115,26 @@ f6c8a09f65324534f9c86a002120e44ccff60a59a9f2c38d84e16f06ad16bc32
 ```
 
 The artifact contains fastp JSON/HTML reports, Bowtie2 logs, MAPQ30 flagstats, MACS3 logs, the narrowPeak file, reference checksum, wall-time measurements, disk snapshots, and benchmark-scope documentation.
+
+## 8. Measured full-source H3K9ac ChIP technical benchmark evidence
+
+A complete-source SIRT7 H3K9ac ChIP technical benchmark also completed successfully in GitHub Actions run `32595547809` on 2026-08-22. Like the CUT&RUN benchmark above, this intentionally aligns against UCSC hg19 chromosome 22 only and is therefore scalability/integrity evidence rather than a final whole-genome occupancy result.
+
+Measured inputs and QC:
+
+- treatment: `SIRT7_rep1_H3K9ac` (`HRR1202646`), 38,740,454 paired FASTQ records before filtering;
+- matched INPUT control: `SIRT7_INPUT` (`HRR1202672`), 30,746,934 paired FASTQ records before filtering;
+- all four compressed-source MD5 values matched the manifest before the samples were accepted;
+- treatment retained 604,496 MAPQ >= 30 reads after alignment, duplicate removal, and filtering on chr22;
+- control retained 623,308 MAPQ >= 30 reads after the same processing;
+- MACS3 was run with `q <= 0.01` and produced 909 chr22 peaks;
+- measured wall time was 3,620 s for treatment and 4,457 s for control;
+- final benchmark working set was approximately 242 MiB after intermediate cleanup.
+
+The uploaded evidence artifact is `bounty1-full-source-chip-chr22` with artifact ZIP SHA-256:
+
+```text
+0b6da3b6867be91dfc36503dd5a918ae011dbe2b064cf4c34d0a5c8c66815c1b
+```
+
+The artifact contains fastp JSON/HTML reports, Bowtie2 logs, MAPQ30 flagstats, MACS3 logs, the narrowPeak file, reference checksum, wall-time measurements, disk snapshots, and benchmark-scope documentation.
