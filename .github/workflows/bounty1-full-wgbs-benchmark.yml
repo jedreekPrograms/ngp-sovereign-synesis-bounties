@@ -1,11 +1,6 @@
 name: Bounty 1 full-source WGBS benchmark
 
 on:
-  pull_request:
-    types: [synchronize]
-    paths:
-      - '.github/workflows/bounty1-full-wgbs-benchmark.yml'
-      - 'bounty1/bin/stream_wgbs_bwameth.sh'
   workflow_dispatch:
 
 concurrency:
