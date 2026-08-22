@@ -1,0 +1,22 @@
+name: Bounty 1 pipeline unit checks
+
+on:
+  pull_request:
+    paths:
+      - 'bounty1/**'
+      - '.github/workflows/bounty1-unit.yml'
+  push:
+    paths:
+      - 'bounty1/**'
+      - '.github/workflows/bounty1-unit.yml'
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pytest scipy
+      - run: pytest bounty1/tests -q

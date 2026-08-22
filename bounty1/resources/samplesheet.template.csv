@@ -1,0 +1,4 @@
+sample_id,condition,replicate,assay,mark,fastq_1,fastq_2
+WT_rep1_H3K9ac,WT,1,CHIP,H3K9ac,/data/WT_rep1_H3K9ac_R1.fastq.gz,/data/WT_rep1_H3K9ac_R2.fastq.gz
+WT_rep1_H3K56ac,WT,1,CHIP,H3K56ac,/data/WT_rep1_H3K56ac_R1.fastq.gz,/data/WT_rep1_H3K56ac_R2.fastq.gz
+WT_rep1_WGBS,WT,1,WGBS,,/data/WT_rep1_WGBS_R1.fastq.gz,/data/WT_rep1_WGBS_R2.fastq.gz
