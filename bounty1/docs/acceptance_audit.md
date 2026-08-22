@@ -92,3 +92,26 @@ The pipeline will not invent either artifact.
 - `docker_image_md5` is emitted only for an actually exported Docker image tarball.
 
 These are final-release tasks after production processing and report generation.
+
+## 7. Measured full-source technical benchmark evidence
+
+A complete-source SIRT6 CUT&RUN technical benchmark completed successfully in GitHub Actions run `32595547809` on 2026-08-22. This benchmark intentionally aligns against UCSC hg19 chromosome 22 only, so it is scalability/integrity evidence and **not** a final whole-genome occupancy result.
+
+Measured inputs and QC:
+
+- treatment: `WT_rep2_SIRT6_CUTRUN` (`HRR1354864`), 16,813,112 paired FASTQ records before filtering;
+- matched control: `WT_rep2_IgG_CUTRUN` (`HRR1354852`), 12,498,528 paired FASTQ records before filtering;
+- all four compressed-source MD5 values matched the manifest before the samples were accepted;
+- treatment retained 176,024 MAPQ >= 30 reads after alignment, duplicate removal, and filtering on chr22;
+- control retained 159,428 MAPQ >= 30 reads after the same processing;
+- MACS3 was run with `q <= 0.05` and produced 882 chr22 peaks;
+- measured wall time was 1,844 s for treatment and 1,519 s for control;
+- final benchmark working set was approximately 130 MiB after intermediate cleanup.
+
+The uploaded evidence artifact is `bounty1-full-source-cutrun-chr22` with artifact ZIP SHA-256:
+
+```text
+f6c8a09f65324534f9c86a002120e44ccff60a59a9f2c38d84e16f06ad16bc32
+```
+
+The artifact contains fastp JSON/HTML reports, Bowtie2 logs, MAPQ30 flagstats, MACS3 logs, the narrowPeak file, reference checksum, wall-time measurements, disk snapshots, and benchmark-scope documentation.
