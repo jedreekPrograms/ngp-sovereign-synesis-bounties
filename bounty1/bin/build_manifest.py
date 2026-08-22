@@ -39,10 +39,25 @@ def main():
     manifest = {
         'pipeline_version': '1.0.0',
         'data_source': {
-            'project': 'PRJCA012536',
-            'study': 'HRA003336',
+            'primary_project': 'PRJCA012536',
+            'primary_study': 'HRA003336',
+            'sirt6_cutrun_study': 'HRA005392',
             'access': 'open',
-            'description': 'paired H3K9ac/H3K56ac ChIP-seq and WGBS in WT and SIRT1-7-deficient human mesenchymal progenitor cells'
+            'description': (
+                'paired H3K9ac/H3K56ac ChIP-seq and WGBS in WT and '
+                'SIRT1-7-deficient human mesenchymal progenitor cells, with '
+                'independent SIRT6 CUT&RUN used to define occupancy loci'
+            ),
+        },
+        'locus_definition': {
+            'assay': 'SIRT6 CUT&RUN',
+            'study': 'HRA005392',
+            'strategy': (
+                'reproducible WT SIRT6 peaks across two replicates with '
+                'reproducible SIRT6-KO antibody peaks removed'
+            ),
+            'minimum_reciprocal_overlap': 0.50,
+            'independent_of_histone_marks': True,
         },
         'dunedinpace': {
             'intercept': pace_model['intercept'],
@@ -50,21 +65,30 @@ def main():
             'implementation': pace_model['source_package'],
             'annotation': pace_model['annotation'],
             'required_background_probes': pace_model['required_background_probes'],
-            'input': 'WGBS-derived beta values at required CpG probes'
+            'input': 'WGBS-derived beta values at required CpG probes',
         },
         'correlations': {
             'H3K9ac_vs_DunedinPACE': corr['H3K9ac_vs_DunedinPACE'],
-            'H3K56ac_vs_DunedinPACE': corr['H3K56ac_vs_DunedinPACE']
+            'H3K56ac_vs_DunedinPACE': corr['H3K56ac_vs_DunedinPACE'],
         },
         'n_paired_samples': corr['n_paired'],
-        'peak_calling': {'caller': 'macs3', 'fdr': a.peak_fdr, 'qvalue_threshold': a.peak_fdr},
-        'alignment': {'aligner': 'bowtie2/bismark', 'reference_genome': 'hg19', 'mapq_threshold': a.mapq},
+        'peak_calling': {
+            'caller': 'macs3',
+            'fdr': a.peak_fdr,
+            'qvalue_threshold': a.peak_fdr,
+        },
+        'alignment': {
+            'aligner': 'bowtie2/bismark',
+            'reference_genome': 'hg19',
+            'mapq_threshold': a.mapq,
+        },
         'data_deposit_doi': a.doi,
         'provenance': {
             'correlations_computed': True,
             'dunedinpace_intercept_read_from_upstream_model': True,
-            'synthetic_values_used': False
-        }
+            'sirt6_loci_derived_independently': True,
+            'synthetic_values_used': False,
+        },
     }
     if a.docker_image:
         p = Path(a.docker_image)
