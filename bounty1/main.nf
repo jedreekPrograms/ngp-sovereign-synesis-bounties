@@ -8,6 +8,7 @@ params.mapq = params.mapq ?: 30
 params.peak_qvalue = params.peak_qvalue ?: 0.01
 params.cutrun_qvalue = params.cutrun_qvalue ?: 0.05
 params.min_cpg_depth = params.min_cpg_depth ?: 6
+params.min_required_probe_fraction = params.min_required_probe_fraction ?: 0.80
 params.sirt6_min_reciprocal_overlap = params.sirt6_min_reciprocal_overlap ?: 0.50
 
 process FASTP {
@@ -25,6 +26,7 @@ process FASTP {
     script:
     def r2 = reads.size() == 2 ? reads[1] : ''
     """
+    set -euo pipefail
     bash ${projectDir}/bin/stream_fastp.sh \
       '${meta.sample_id}' \
       '${reads[0]}' \
@@ -87,6 +89,7 @@ process CALL_PEAKS {
     def macsFormat = meta.paired ? 'BAMPE' : 'BAM'
     def control = "${meta.condition}_INPUT.mapq${params.mapq}.bam"
     """
+    set -euo pipefail
     test -f ${control}
     macs3 callpeak -t ${bam} -c ${control} -f ${macsFormat} -g hs \
       -n ${meta.sample_id} -q ${params.peak_qvalue} --keep-dup all -B
@@ -139,6 +142,7 @@ process CALL_CUTRUN_PEAKS {
     script:
     def control = "${meta.condition}_rep${meta.replicate}_IgG_CUTRUN.mapq${params.mapq}.bam"
     """
+    set -euo pipefail
     test -f ${control}
     macs3 callpeak -t ${bam} -c ${control} -f BAMPE -g hs \
       -n ${meta.sample_id} -q ${params.cutrun_qvalue} --keep-dup all --call-summits
@@ -158,6 +162,7 @@ process BUILD_SIRT6_LOCI {
     path 'sirt6_specific_loci.bed', emit: loci
     script:
     """
+    set -euo pipefail
     python3 ${projectDir}/bin/build_sirt6_loci.py \
       --peaks-glob '*_peaks.narrowPeak' \
       --min-reciprocal-overlap ${params.sirt6_min_reciprocal_overlap} \
@@ -176,25 +181,29 @@ process ALIGN_WGBS {
     input:
     tuple val(meta), path(reads)
     output:
-    tuple val(meta), path("${meta.sample_id}.mapq${params.mapq}.deduplicated.bam"), path("${meta.sample_id}.mapq${params.mapq}.deduplicated.bam.bai"), emit: bam
+    // Paired-end methylation extraction requires mates to remain adjacent.
+    // Keep the post-MAPQ BAM name-sorted and intentionally do not index it.
+    tuple val(meta), path("${meta.sample_id}.mapq${params.mapq}.deduplicated.name.bam"), emit: bam
     script:
     def readArgs = reads.size() == 2 ? "-1 ${reads[0]} -2 ${reads[1]}" : "${reads[0]}"
+    def dedupMode = meta.paired ? '--paired' : '--single'
     """
     set -euo pipefail
     mkdir -p bismark_${meta.sample_id}
-    bismark --genome ${params.bismark_index} --bowtie2 --parallel 2 --output_dir bismark_${meta.sample_id} ${readArgs}
+    bismark --genome ${params.bismark_index} --bowtie2 --parallel 2 \
+      --output_dir bismark_${meta.sample_id} ${readArgs}
     BAM=\$(find bismark_${meta.sample_id} -name '*_bismark_bt2*.bam' | head -n1)
     test -n "\${BAM}"
-    deduplicate_bismark --bam ${meta.paired ? '--paired' : ''} --output_dir . \${BAM}
+    deduplicate_bismark --bam ${dedupMode} --output_dir . \${BAM}
     DEDUP=\$(find . -maxdepth 1 -name '*.deduplicated.bam' | head -n1)
     test -n "\${DEDUP}"
-    samtools view -b -q ${params.mapq} \${DEDUP} | samtools sort -@ ${task.cpus} -o ${meta.sample_id}.mapq${params.mapq}.deduplicated.bam
-    samtools index ${meta.sample_id}.mapq${params.mapq}.deduplicated.bam
+    samtools view -b -q ${params.mapq} \${DEDUP} | \
+      samtools sort -n -@ ${task.cpus} -o ${meta.sample_id}.mapq${params.mapq}.deduplicated.name.bam
+    samtools quickcheck -v ${meta.sample_id}.mapq${params.mapq}.deduplicated.name.bam
     """
     stub:
     """
-    touch ${meta.sample_id}.mapq${params.mapq}.deduplicated.bam
-    touch ${meta.sample_id}.mapq${params.mapq}.deduplicated.bam.bai
+    touch ${meta.sample_id}.mapq${params.mapq}.deduplicated.name.bam
     """
 }
 
@@ -203,17 +212,18 @@ process EXTRACT_METHYLATION {
     label 'big_mem'
     publishDir "${params.outdir}/methylation", mode: 'copy'
     input:
-    tuple val(meta), path(bam), path(bai)
+    tuple val(meta), path(bam)
     output:
     tuple val(meta), path("${meta.sample_id}.bismark.cov.gz"), emit: cov
     script:
-    def pairedArg = meta.paired ? '--paired-end' : ''
+    def pairedArg = meta.paired ? '--paired-end' : '--single-end'
     """
     set -euo pipefail
     bismark_methylation_extractor ${pairedArg} --comprehensive --gzip --bedGraph ${bam}
     COV=\$(find . -name '*.bismark.cov.gz' | head -n1)
     test -n "\${COV}"
     mv \${COV} ${meta.sample_id}.bismark.cov.gz
+    gzip -t ${meta.sample_id}.bismark.cov.gz
     """
     stub:
     """
@@ -233,6 +243,7 @@ process BUILD_PACE_MATRIX {
     path 'pace_model_metadata.csv', emit: model_metadata
     script:
     """
+    set -euo pipefail
     Rscript ${projectDir}/bin/compute_dunedinpace.R \
       --cov-dir . \
       --scores dunedinpace_scores.csv \
@@ -244,16 +255,16 @@ process BUILD_PACE_MATRIX {
     stub:
     """
     cat > dunedinpace_scores.csv <<'EOF'
-    sample_id,condition,replicate,dunedinpace,model
-    WT_rep1_WGBS,WT,1,1.00,DunedinPACE
-    SIRT1_rep1_WGBS,SIRT1,1,1.10,DunedinPACE
-    SIRT2_rep1_WGBS,SIRT2,1,1.20,DunedinPACE
-    EOF
+sample_id,condition,replicate,dunedinpace,model
+WT_rep1_WGBS,WT,1,1.00,DunedinPACE
+SIRT1_rep1_WGBS,SIRT1,1,1.10,DunedinPACE
+SIRT2_rep1_WGBS,SIRT2,1,1.20,DunedinPACE
+EOF
     echo 'sample_id,matched_probes,required_probes,fraction,min_cpg_depth' > pace_probe_qc.csv
     cat > pace_model_metadata.csv <<'EOF'
-    model,intercept,required_background_probes,annotation,source_package
-    DunedinPACE,-1.949859,20000,IlluminaHumanMethylationEPICanno.ilm10b4.hg19,danbelsky/DunedinPACE@4b569983543e51d1022aecec9a25e694bb3a336a
-    EOF
+model,intercept,required_background_probes,annotation,source_package
+DunedinPACE,-1.949859,20000,IlluminaHumanMethylationEPICanno.ilm10b4.hg19,danbelsky/DunedinPACE@4b569983543e51d1022aecec9a25e694bb3a336a
+EOF
     """
 }
 
@@ -269,6 +280,7 @@ process CHIP_OCCUPANCY {
     path 'histone_occupancy.csv', emit: occupancy
     script:
     """
+    set -euo pipefail
     python3 ${projectDir}/bin/compute_chip_occupancy.py \
       --peaks-glob '*_peaks.narrowPeak' \
       --bam-glob '*.bam' \
@@ -278,14 +290,14 @@ process CHIP_OCCUPANCY {
     stub:
     """
     cat > histone_occupancy.csv <<'EOF'
-    condition,replicate,mark,differential_occupancy,log2_cpm
-    WT,1,H3K9ac,0,1
-    WT,1,H3K56ac,0,1
-    SIRT1,1,H3K9ac,1,2
-    SIRT1,1,H3K56ac,1,2
-    SIRT2,1,H3K9ac,2,3
-    SIRT2,1,H3K56ac,2,3
-    EOF
+condition,replicate,mark,differential_occupancy,log2_cpm
+WT,1,H3K9ac,0,1
+WT,1,H3K56ac,0,1
+SIRT1,1,H3K9ac,1,2
+SIRT1,1,H3K56ac,1,2
+SIRT2,1,H3K9ac,2,3
+SIRT2,1,H3K56ac,2,3
+EOF
     """
 }
 
@@ -299,13 +311,14 @@ process CORRELATE {
     path 'correlations.json', emit: correlations
     script:
     """
+    set -euo pipefail
     python3 ${projectDir}/bin/correlate.py --pace ${scores} --occupancy ${occupancy} --output correlations.json
     """
     stub:
     """
     cat > correlations.json <<'EOF'
-    {"H3K9ac_vs_DunedinPACE":{"pearson_r":1.0,"p_value":0.0,"n":3},"H3K56ac_vs_DunedinPACE":{"pearson_r":1.0,"p_value":0.0,"n":3},"n_paired":3}
-    EOF
+{"H3K9ac_vs_DunedinPACE":{"pearson_r":1.0,"p_value":0.0,"n":3},"H3K56ac_vs_DunedinPACE":{"pearson_r":1.0,"p_value":0.0,"n":3},"n_paired":3}
+EOF
     """
 }
 
@@ -319,11 +332,14 @@ process MANIFEST {
     path 'manifest.json'
     script:
     """
+    set -euo pipefail
     python3 ${projectDir}/bin/build_manifest.py \
       --correlations ${correlations} \
       --model-metadata ${model_metadata} \
       --mapq ${params.mapq} \
       --peak-fdr ${params.peak_qvalue} \
+      --cutrun-fdr ${params.cutrun_qvalue} \
+      --sirt6-min-reciprocal-overlap ${params.sirt6_min_reciprocal_overlap} \
       --output manifest.json
     """
     stub:
