@@ -105,9 +105,15 @@ process BUILD_PACE_MATRIX {
     output:
     path 'dunedinpace_scores.csv', emit: scores
     path 'pace_probe_qc.csv', emit: qc
+    path 'pace_model_metadata.csv', emit: model_metadata
     script:
     """
-    Rscript ${projectDir}/bin/compute_dunedinpace.R --cov-dir . --scores dunedinpace_scores.csv --qc pace_probe_qc.csv --min-probe-fraction ${params.min_required_probe_fraction}
+    Rscript ${projectDir}/bin/compute_dunedinpace.R \
+      --cov-dir . \
+      --scores dunedinpace_scores.csv \
+      --qc pace_probe_qc.csv \
+      --model-metadata pace_model_metadata.csv \
+      --min-probe-fraction ${params.min_required_probe_fraction}
     """
 }
 
@@ -145,11 +151,17 @@ process MANIFEST {
     publishDir "${params.outdir}", mode: 'copy'
     input:
     path correlations
+    path model_metadata
     output:
     path 'manifest.json'
     script:
     """
-    python3 ${projectDir}/bin/build_manifest.py --correlations ${correlations} --mapq ${params.mapq} --peak-fdr ${params.peak_qvalue} --output manifest.json
+    python3 ${projectDir}/bin/build_manifest.py \
+      --correlations ${correlations} \
+      --model-metadata ${model_metadata} \
+      --mapq ${params.mapq} \
+      --peak-fdr ${params.peak_qvalue} \
+      --output manifest.json
     """
 }
 
@@ -170,8 +182,12 @@ workflow {
     peaks = CALL_PEAKS(chip_bam).peaks
     wgbs_bam = ALIGN_WGBS(wgbs_trim).bam
     cov = EXTRACT_METHYLATION(wgbs_bam).cov
-    pace = BUILD_PACE_MATRIX(cov.map { meta, p -> p }.collect()).scores
-    occupancy = CHIP_OCCUPANCY(peaks.map { meta, p -> p }.collect(), chip_bam.map { meta, b, bai -> b }.collect(), chip_bam.map { meta, b, bai -> bai }.collect()).occupancy
-    corr = CORRELATE(pace, occupancy).correlations
-    MANIFEST(corr)
+    pace_result = BUILD_PACE_MATRIX(cov.map { meta, p -> p }.collect())
+    occupancy = CHIP_OCCUPANCY(
+        peaks.map { meta, p -> p }.collect(),
+        chip_bam.map { meta, b, bai -> b }.collect(),
+        chip_bam.map { meta, b, bai -> bai }.collect()
+    ).occupancy
+    corr = CORRELATE(pace_result.scores, occupancy).correlations
+    MANIFEST(corr, pace_result.model_metadata)
 }
