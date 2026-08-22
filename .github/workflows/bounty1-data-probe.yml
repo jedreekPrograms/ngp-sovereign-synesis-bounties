@@ -1,0 +1,79 @@
+name: Bounty 1 data availability probe
+
+on:
+  push:
+    paths:
+      - '.github/workflows/bounty1-data-probe.yml'
+      - 'bounty1/resources/samplesheet.csv'
+      - 'bounty1/resources/chip_inputs.csv'
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: HEAD-check all production FASTQ URLs and estimate download size
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import csv
+          import re
+          import subprocess
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+          from pathlib import Path
+
+          sheets = [
+              Path('bounty1/resources/samplesheet.csv'),
+              Path('bounty1/resources/chip_inputs.csv'),
+          ]
+          urls = []
+          for sheet in sheets:
+              with sheet.open(newline='', encoding='utf-8') as fh:
+                  for row in csv.DictReader(fh):
+                      for key in ('fastq_1', 'fastq_2'):
+                          if row.get(key):
+                              urls.append((row['sample_id'], key, row[key]))
+
+          def probe(item):
+              sample, mate, url = item
+              p = subprocess.run(
+                  ['curl', '--head', '--location', '--silent', '--show-error',
+                   '--max-time', '25', '--retry', '2', url],
+                  text=True, capture_output=True, check=False,
+              )
+              lengths = [int(x) for x in re.findall(r'(?im)^content-length:\s*(\d+)\s*$', p.stdout)]
+              size = lengths[-1] if lengths else None
+              status = None
+              codes = re.findall(r'(?im)^HTTP/\S+\s+(\d{3})', p.stdout)
+              if codes:
+                  status = int(codes[-1])
+              return sample, mate, url, status, size, p.stderr.strip()
+
+          results = []
+          with ThreadPoolExecutor(max_workers=12) as pool:
+              futures = [pool.submit(probe, item) for item in urls]
+              for f in as_completed(futures):
+                  results.append(f.result())
+
+          failures = []
+          known = 0
+          for sample, mate, url, status, size, err in sorted(results):
+              gib = '' if size is None else f'{size / 1024**3:.3f} GiB'
+              print(f'{sample:24} {mate:7} HTTP={status} {gib:>12} {url}')
+              if status is None or not (200 <= status < 400):
+                  failures.append((sample, mate, status, err))
+              if size is not None:
+                  known += size
+
+          print('\n--- summary ---')
+          print(f'URLs: {len(results)}')
+          print(f'URLs with Content-Length: {sum(r[4] is not None for r in results)}')
+          print(f'Known total compressed size: {known / 1024**3:.2f} GiB')
+          print(f'Failed HEAD checks: {len(failures)}')
+          if failures:
+              for row in failures:
+                  print('FAIL', row)
+              raise SystemExit(1)
+          PY
