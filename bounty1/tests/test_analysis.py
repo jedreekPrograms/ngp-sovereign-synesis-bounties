@@ -63,7 +63,12 @@ def test_manifest_uses_model_metadata_and_marks_data_as_non_synthetic(tmp_path):
     assert m['peak_calling']['fdr'] < 0.05
     assert m['dunedinpace']['intercept'] == 51.024577
     assert m['dunedinpace']['model'] == 'Age45'
+    assert m['data_source']['primary_study'] == 'HRA003336'
+    assert m['data_source']['sirt6_cutrun_study'] == 'HRA005392'
+    assert m['locus_definition']['independent_of_histone_marks'] is True
+    assert m['locus_definition']['minimum_reciprocal_overlap'] == 0.50
     assert m['provenance']['dunedinpace_intercept_read_from_upstream_model'] is True
+    assert m['provenance']['sirt6_loci_derived_independently'] is True
     assert m['provenance']['synthetic_values_used'] is False
     assert m['data_deposit_doi'] == ''
 
