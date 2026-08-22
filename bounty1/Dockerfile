@@ -18,6 +18,8 @@ RUN micromamba install -y -n base -c conda-forge -c bioconda \
       bismark=3.1.0 \
       pysam=0.24.0 \
       scipy=1.17.1 \
+      matplotlib-base=3.10.9 \
+      reportlab=5.0.0 \
       r-base=4.3.3 \
       r-optparse=1.7.5 \
       r-data.table=1.17.8 \
