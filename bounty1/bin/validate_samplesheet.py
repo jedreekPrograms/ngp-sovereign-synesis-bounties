@@ -57,24 +57,35 @@ def validate(path: Path):
         raise ValueError(f'duplicate sample_id values: {dup}')
 
     matrix = defaultdict(set)
+    input_controls = set()
     runs = []
     for r in rows:
         cond = r['condition']
         if cond not in CONDITIONS:
             raise ValueError(f'unknown condition {cond}')
         rep = int(r['replicate'])
-        if rep < 1:
-            raise ValueError('replicate must be >= 1')
         assay = r['assay']
         if assay == 'CHIP':
+            if rep < 1:
+                raise ValueError('CHIP replicate must be >= 1')
             mark = r['mark']
             if mark not in MARKS:
                 raise ValueError(f'CHIP sample {r["sample_id"]} has invalid mark {mark}')
             matrix[(cond, rep)].add(mark)
         elif assay == 'WGBS':
+            if rep < 1:
+                raise ValueError('WGBS replicate must be >= 1')
             if r['mark']:
                 raise ValueError(f'WGBS sample {r["sample_id"]} must have an empty mark')
             matrix[(cond, rep)].add('WGBS')
+        elif assay == 'INPUT':
+            if rep != 0:
+                raise ValueError(f'INPUT sample {r["sample_id"]} must use replicate 0')
+            if r['mark']:
+                raise ValueError(f'INPUT sample {r["sample_id"]} must have an empty mark')
+            if cond in input_controls:
+                raise ValueError(f'duplicate INPUT control for {cond}')
+            input_controls.add(cond)
         else:
             raise ValueError(f'unknown assay {assay}')
 
