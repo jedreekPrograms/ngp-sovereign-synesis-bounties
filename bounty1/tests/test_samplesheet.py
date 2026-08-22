@@ -4,7 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'bin'))
-from validate_samplesheet import validate
+from validate_samplesheet import validate, validate_controls
 
 
 def test_validate_minimum_complete_pairs(tmp_path):
@@ -54,3 +54,13 @@ def test_hra003336_production_samplesheet_is_complete():
         run = row['run_accession']
         assert row['fastq_1'].endswith(f'/{run}_f1.fq.gz')
         assert row['fastq_2'].endswith(f'/{run}_r2.fq.gz')
+
+
+def test_hra003336_chip_input_controls_are_complete():
+    controls = ROOT / 'resources' / 'chip_inputs.csv'
+    assert validate_controls(controls) == 8
+    with controls.open(newline='', encoding='utf-8') as fh:
+        rows = list(csv.DictReader(fh))
+    assert {r['condition'] for r in rows} == {'WT', *(f'SIRT{i}' for i in range(1, 8))}
+    assert all(r['sample_id'] == f"{r['condition']}_INPUT" for r in rows)
+    assert all(r['read1_md5'] and r['read2_md5'] for r in rows)
