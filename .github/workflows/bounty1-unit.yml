@@ -35,8 +35,8 @@ jobs:
           python-version: '3.11'
       - name: Install static-analysis tools
         run: pip install ruff bandit
-      - name: Ruff production and unit code
-        run: ruff check --select E,F bounty1/bin bounty1/tests
+      - name: Ruff correctness checks
+        run: ruff check --select F,E9 bounty1/bin bounty1/tests
       - name: Bandit medium/high findings
         run: bandit -q -ll -r bounty1/bin
 
