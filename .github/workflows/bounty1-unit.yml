@@ -90,9 +90,10 @@ jobs:
       - name: Smoke-test complete Nextflow graph without real data
         run: |
           docker run --rm bounty1-pace:ci \
-            nextflow run main.nf -stub-run -ansi-log false \
+            nextflow run main.nf -profile ci -stub-run -ansi-log false \
             --samplesheet tests/fixtures/smoke_samplesheet.csv \
             --controls_sheet tests/fixtures/smoke_controls.csv \
+            --cutrun_sheet tests/fixtures/smoke_cutrun.csv \
             --bowtie2_index /tmp/stub/hg19 \
             --bismark_index /tmp/stub \
             --outdir /tmp/bounty1-smoke
