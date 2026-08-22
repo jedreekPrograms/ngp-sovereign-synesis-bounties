@@ -11,6 +11,8 @@ RUN micromamba install -y -n base -c conda-forge -c bioconda \
       openjdk=21.0.9 \
       fastp=1.3.6 \
       bowtie2=2.5.5 \
+      bwa=0.7.19 \
+      bwameth=0.2.9 \
       samtools=1.24 \
       macs3=3.0.4 \
       bismark=3.1.0 \
@@ -22,6 +24,13 @@ RUN micromamba install -y -n base -c conda-forge -c bioconda \
       r-remotes=2.5.0 \
       bioconductor-minfi=1.48.0 \
       bioconductor-illuminahumanmethylationepicanno.ilm10b4.hg19=0.6.0 \
+    && micromamba clean --all --yes
+
+# MethylDackel 0.6.1 currently links against htslib <1.24, while the primary
+# workflow intentionally pins samtools/htslib 1.24. Keep the extractor in an
+# isolated environment rather than weakening the primary toolchain pin.
+RUN micromamba create -y -n methyldackel -c conda-forge -c bioconda \
+      methyldackel=0.6.1 \
     && micromamba clean --all --yes
 
 # Pin the upstream research implementation for reproducibility. Docker build
