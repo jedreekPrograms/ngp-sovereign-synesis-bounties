@@ -64,8 +64,16 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - name: Build analysis image
-        run: docker build --pull -t bounty1-pace:ci bounty1
+      - uses: docker/setup-buildx-action@v3
+      - name: Build analysis image with shared GHA cache
+        uses: docker/build-push-action@v6
+        with:
+          context: bounty1
+          load: true
+          pull: true
+          tags: bounty1-pace:ci
+          cache-from: type=gha,scope=bounty1-docker
+          cache-to: type=gha,mode=max,scope=bounty1-docker
       - name: Validate production metadata inside image
         run: docker run --rm bounty1-pace:ci python bin/validate_samplesheet.py resources/samplesheet.csv --controls-sheet resources/chip_inputs.csv
       - name: Verify upstream DunedinPACE model is installed
