@@ -40,6 +40,22 @@ jobs:
       - name: Bandit medium/high findings
         run: bandit -q -ll -r bounty1/bin
 
+  plaza-score-preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Plaza scoring dependencies
+        run: pip install pytest bandit pylint
+      - name: Run behavioral scoring tests
+        run: pytest bounty1/plaza_submission/tests -q
+      - name: Reject medium/high Bandit findings
+        run: bandit -q -ll bounty1/plaza_submission/pace_pipeline_core.py
+      - name: Require Plaza-quality Pylint score
+        run: pylint --fail-under=9.70 bounty1/plaza_submission/pace_pipeline_core.py
+
   data-probe:
     runs-on: ubuntu-latest
     timeout-minutes: 15
