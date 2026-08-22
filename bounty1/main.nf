@@ -182,11 +182,12 @@ process ALIGN_WGBS {
     tuple val(meta), path(reads)
     output:
     // Paired-end methylation extraction requires mates to remain adjacent.
-    // Keep the post-MAPQ BAM name-sorted and intentionally do not index it.
     tuple val(meta), path("${meta.sample_id}.mapq${params.mapq}.deduplicated.name.bam"), emit: bam
+    tuple val(meta), path("${meta.sample_id}.wgbs_pair_filter.json"), emit: filter_stats
     script:
     def readArgs = reads.size() == 2 ? "-1 ${reads[0]} -2 ${reads[1]}" : "${reads[0]}"
     def dedupMode = meta.paired ? '--paired' : '--single'
+    def pairArg = meta.paired ? '--paired' : ''
     """
     set -euo pipefail
     mkdir -p bismark_${meta.sample_id}
@@ -197,13 +198,19 @@ process ALIGN_WGBS {
     deduplicate_bismark --bam ${dedupMode} --output_dir . \${BAM}
     DEDUP=\$(find . -maxdepth 1 -name '*.deduplicated.bam' | head -n1)
     test -n "\${DEDUP}"
-    samtools view -b -q ${params.mapq} \${DEDUP} | \
-      samtools sort -n -@ ${task.cpus} -o ${meta.sample_id}.mapq${params.mapq}.deduplicated.name.bam
+    samtools sort -n -@ ${task.cpus} -o ${meta.sample_id}.deduplicated.name.pre-mapq.bam \${DEDUP}
+    python3 ${projectDir}/bin/filter_paired_bam.py \
+      --input ${meta.sample_id}.deduplicated.name.pre-mapq.bam \
+      --output ${meta.sample_id}.mapq${params.mapq}.deduplicated.name.bam \
+      --mapq ${params.mapq} ${pairArg} \
+      --stats ${meta.sample_id}.wgbs_pair_filter.json
     samtools quickcheck -v ${meta.sample_id}.mapq${params.mapq}.deduplicated.name.bam
+    rm -f ${meta.sample_id}.deduplicated.name.pre-mapq.bam
     """
     stub:
     """
     touch ${meta.sample_id}.mapq${params.mapq}.deduplicated.name.bam
+    echo '{"mapq_threshold":${params.mapq},"paired":${meta.paired}}' > ${meta.sample_id}.wgbs_pair_filter.json
     """
 }
 
