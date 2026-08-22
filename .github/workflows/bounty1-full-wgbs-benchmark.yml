@@ -1,9 +1,8 @@
 name: Bounty 1 full-source WGBS benchmark
 
 on:
-  push:
-    branches:
-      - bounty-1-real-pipeline
+  pull_request:
+    types: [synchronize]
     paths:
       - '.github/workflows/bounty1-full-wgbs-benchmark.yml'
   workflow_dispatch:
