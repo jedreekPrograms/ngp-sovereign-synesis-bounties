@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Stream one or two compressed FASTQ sources directly into fastp while
-# calculating the archive MD5 on the exact compressed byte stream. Remote
-# inputs are never materialized as raw FASTQ files on disk.
+# Stream one or two gzip-compressed FASTQ sources into fastp while calculating
+# the archive MD5 on the exact compressed byte stream. Compressed input bytes
+# are decompressed on the fly into plain-FASTQ FIFOs, so the remote archives
+# are never materialized on disk and fastp does not need to seek/re-open a gzip
+# FIFO (which is not supported reliably by its igzip reader).
 #
 # Usage:
 #   stream_fastp.sh SAMPLE_ID R1_SOURCE R2_SOURCE R1_MD5 R2_MD5 THREADS
@@ -47,15 +49,16 @@ verify_md5() {
 }
 
 cleanup() {
-  rm -f r1.fastp.fq.gz r1.md5.fifo r2.fastp.fq.gz r2.md5.fifo
+  rm -f r1.fastp.fq r1.md5.fifo r2.fastp.fq r2.md5.fifo
 }
 trap cleanup EXIT
 
-# fastp uses the input filename suffix to select gzip input handling, therefore
-# the data FIFOs deliberately end in .fq.gz.
-mkfifo r1.fastp.fq.gz r1.md5.fifo
+# Keep the MD5 calculation on the original compressed bytes, then decompress
+# the same byte stream before handing it to fastp. A plain FASTQ FIFO avoids
+# fastp/igzip attempting seek-like gzip probing on a named pipe.
+mkfifo r1.fastp.fq r1.md5.fifo
 (
-  stream_source "$r1_source" | tee r1.md5.fifo > r1.fastp.fq.gz
+  stream_source "$r1_source" | tee r1.md5.fifo | gzip -dc > r1.fastp.fq
 ) &
 r1_stream_pid=$!
 (
@@ -64,9 +67,9 @@ r1_stream_pid=$!
 r1_md5_pid=$!
 
 if [[ -n "$r2_source" ]]; then
-  mkfifo r2.fastp.fq.gz r2.md5.fifo
+  mkfifo r2.fastp.fq r2.md5.fifo
   (
-    stream_source "$r2_source" | tee r2.md5.fifo > r2.fastp.fq.gz
+    stream_source "$r2_source" | tee r2.md5.fifo | gzip -dc > r2.fastp.fq
   ) &
   r2_stream_pid=$!
   (
@@ -75,8 +78,8 @@ if [[ -n "$r2_source" ]]; then
   r2_md5_pid=$!
 
   fastp \
-    -i r1.fastp.fq.gz \
-    -I r2.fastp.fq.gz \
+    -i r1.fastp.fq \
+    -I r2.fastp.fq \
     -o "${sample_id}.trimmed.R1.fastq.gz" \
     -O "${sample_id}.trimmed.R2.fastq.gz" \
     --json "${sample_id}.fastp.json" \
@@ -87,7 +90,7 @@ if [[ -n "$r2_source" ]]; then
   verify_md5 "$r2_expected" r2.actual.md5 "${sample_id} R2"
 else
   fastp \
-    -i r1.fastp.fq.gz \
+    -i r1.fastp.fq \
     -o "${sample_id}.trimmed.R1.fastq.gz" \
     --json "${sample_id}.fastp.json" \
     --html "${sample_id}.fastp.html" \
