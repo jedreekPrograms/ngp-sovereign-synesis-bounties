@@ -34,3 +34,12 @@ jobs:
       - name: Verify upstream DunedinPACE model is installed
         run: |
           docker run --rm bounty1-pace:ci R -q -e "library(DunedinPACE); stopifnot(length(mPACE_Models\$model_names) > 0); stopifnot(all(is.finite(unlist(mPACE_Models\$model_intercept)))); print(mPACE_Models\$model_intercept)"
+      - name: Smoke-test complete Nextflow graph without real data
+        run: |
+          docker run --rm bounty1-pace:ci \
+            nextflow run main.nf -stub-run -ansi-log false \
+            --samplesheet tests/fixtures/smoke_samplesheet.csv \
+            --controls_sheet tests/fixtures/smoke_controls.csv \
+            --bowtie2_index /tmp/stub/hg19 \
+            --bismark_index /tmp/stub \
+            --outdir /tmp/bounty1-smoke
