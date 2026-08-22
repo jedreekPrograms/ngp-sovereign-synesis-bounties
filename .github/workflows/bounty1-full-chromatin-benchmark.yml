@@ -1,5 +1,6 @@
 name: Bounty 1 full-source chromatin benchmarks
 
+# Full-source scalability benchmark. Expensive reruns are intentionally explicit.
 on:
   push:
     branches:
