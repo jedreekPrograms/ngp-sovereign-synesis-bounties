@@ -4,12 +4,66 @@ params.samplesheet = params.samplesheet ?: 'resources/samplesheet.csv'
 params.controls_sheet = params.controls_sheet ?: 'resources/chip_inputs.csv'
 params.cutrun_sheet = params.cutrun_sheet ?: 'resources/sirt6_cutrun.csv'
 params.outdir = params.outdir ?: 'results'
+params.reference_fasta_url = params.reference_fasta_url ?: 'https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz'
 params.mapq = params.mapq ?: 30
 params.peak_qvalue = params.peak_qvalue ?: 0.01
 params.cutrun_qvalue = params.cutrun_qvalue ?: 0.05
 params.min_cpg_depth = params.min_cpg_depth ?: 6
 params.min_required_probe_fraction = params.min_required_probe_fraction ?: 0.80
 params.sirt6_min_reciprocal_overlap = params.sirt6_min_reciprocal_overlap ?: 0.50
+params.pace_probe_flank = params.pace_probe_flank ?: 500
+
+process PREPARE_REFERENCE {
+    tag 'hg19-reference'
+    label 'big_mem'
+    publishDir "${params.outdir}/provenance/reference", mode: 'copy'
+    input:
+    val reference_url
+    output:
+    path 'reference', emit: refdir
+    script:
+    """
+    set -euo pipefail
+    mkdir -p reference
+    curl -fsSL --retry 5 --retry-delay 5 -o reference/hg19.fa.gz '${reference_url}'
+    gzip -t reference/hg19.fa.gz
+    gzip -d reference/hg19.fa.gz
+    test -s reference/hg19.fa
+    sha256sum reference/hg19.fa > reference/hg19.fa.sha256
+    samtools faidx reference/hg19.fa
+    bowtie2-build --threads ${task.cpus} reference/hg19.fa reference/hg19
+    bwameth.py index reference/hg19.fa
+    """
+    stub:
+    """
+    mkdir -p reference
+    printf '>chr1\nACGTACGTACGT\n' > reference/hg19.fa
+    printf 'chr1\t12\t6\t12\t13\n' > reference/hg19.fa.fai
+    echo 'stub' > reference/hg19.fa.sha256
+    touch reference/hg19.1.bt2 reference/hg19.2.bt2 reference/hg19.3.bt2 reference/hg19.4.bt2
+    touch reference/hg19.rev.1.bt2 reference/hg19.rev.2.bt2
+    touch reference/hg19.fa.bwameth.c2t reference/hg19.fa.bwameth.c2t.amb
+    """
+}
+
+process PREPARE_PACE_WINDOWS {
+    tag 'DunedinPACE-probe-windows'
+    publishDir "${params.outdir}/provenance", mode: 'copy'
+    output:
+    path 'dunedinpace_probe_windows.bed', emit: bed
+    script:
+    """
+    set -euo pipefail
+    Rscript ${projectDir}/bin/export_pace_regions.R \
+      --output dunedinpace_probe_windows.bed \
+      --flank ${params.pace_probe_flank}
+    test -s dunedinpace_probe_windows.bed
+    """
+    stub:
+    """
+    printf 'chr1\t0\t1000\tcg00000029\n' > dunedinpace_probe_windows.bed
+    """
+}
 
 process FASTP {
     tag "${meta.sample_id}"
@@ -50,6 +104,7 @@ process ALIGN_CHIP {
     publishDir "${params.outdir}/alignment/chip", mode: 'copy'
     input:
     tuple val(meta), path(reads)
+    path refdir
     output:
     tuple val(meta), path("${meta.sample_id}.mapq${params.mapq}.bam"), path("${meta.sample_id}.mapq${params.mapq}.bam.bai"), emit: bam
     tuple val(meta), path("${meta.sample_id}.flagstat.txt"), emit: flagstat
@@ -57,7 +112,7 @@ process ALIGN_CHIP {
     def readArgs = reads.size() == 2 ? "-1 ${reads[0]} -2 ${reads[1]}" : "-U ${reads[0]}"
     """
     set -euo pipefail
-    bowtie2 -x ${params.bowtie2_index} ${readArgs} -p ${task.cpus} 2> ${meta.sample_id}.bowtie2.log | \
+    bowtie2 --very-sensitive -x ${refdir}/hg19 ${readArgs} -p ${task.cpus} 2> ${meta.sample_id}.bowtie2.log | \
       samtools view -b - | samtools sort -n -@ ${task.cpus} -o ${meta.sample_id}.name.bam
     samtools fixmate -m ${meta.sample_id}.name.bam ${meta.sample_id}.fixmate.bam
     samtools sort -@ ${task.cpus} -o ${meta.sample_id}.position.bam ${meta.sample_id}.fixmate.bam
@@ -107,6 +162,7 @@ process ALIGN_CUTRUN {
     publishDir "${params.outdir}/alignment/cutrun", mode: 'copy'
     input:
     tuple val(meta), path(reads)
+    path refdir
     output:
     tuple val(meta), path("${meta.sample_id}.mapq${params.mapq}.bam"), path("${meta.sample_id}.mapq${params.mapq}.bam.bai"), emit: bam
     script:
@@ -114,7 +170,7 @@ process ALIGN_CUTRUN {
     """
     set -euo pipefail
     bowtie2 --very-sensitive --no-mixed --no-discordant --dovetail \
-      -x ${params.bowtie2_index} ${readArgs} -p ${task.cpus} 2> ${meta.sample_id}.bowtie2.log | \
+      -x ${refdir}/hg19 ${readArgs} -p ${task.cpus} 2> ${meta.sample_id}.bowtie2.log | \
       samtools view -b - | samtools sort -n -@ ${task.cpus} -o ${meta.sample_id}.name.bam
     samtools fixmate -m ${meta.sample_id}.name.bam ${meta.sample_id}.fixmate.bam
     samtools sort -@ ${task.cpus} -o ${meta.sample_id}.position.bam ${meta.sample_id}.fixmate.bam
@@ -174,62 +230,68 @@ process BUILD_SIRT6_LOCI {
     """
 }
 
-process ALIGN_WGBS {
+process ALIGN_WGBS_STREAM {
     tag "${meta.sample_id}"
-    label 'big_mem'
+    label 'stream_io'
     publishDir "${params.outdir}/alignment/wgbs", mode: 'copy'
+    publishDir "${params.outdir}/qc/fastp", mode: 'copy', saveAs: { name ->
+        (name.endsWith('.json') || name.endsWith('.html')) ? name : null
+    }
     input:
-    tuple val(meta), path(reads)
+    tuple val(meta), val(reads)
+    path refdir
+    path pace_bed
     output:
-    // Paired-end methylation extraction requires mates to remain adjacent.
-    tuple val(meta), path("${meta.sample_id}.mapq${params.mapq}.deduplicated.name.bam"), emit: bam
-    tuple val(meta), path("${meta.sample_id}.wgbs_pair_filter.json"), emit: filter_stats
+    tuple val(meta), path("${meta.sample_id}.mapq${params.mapq}.pace-targets.deduplicated.bam"), path("${meta.sample_id}.mapq${params.mapq}.pace-targets.deduplicated.bam.bai"), emit: bam
+    path "${meta.sample_id}.fastp.json", emit: fastp_json
+    path "${meta.sample_id}.fastp.html", emit: fastp_html
+    path "${meta.sample_id}.pace-targets.flagstat.txt", emit: flagstat
     script:
-    def readArgs = reads.size() == 2 ? "-1 ${reads[0]} -2 ${reads[1]}" : "${reads[0]}"
-    def dedupMode = meta.paired ? '--paired' : '--single'
-    def pairArg = meta.paired ? '--paired' : ''
+    if (!meta.paired) {
+        error "Streaming WGBS path requires paired-end input for ${meta.sample_id}"
+    }
     """
     set -euo pipefail
-    mkdir -p bismark_${meta.sample_id}
-    bismark --genome ${params.bismark_index} --bowtie2 --parallel 2 \
-      --output_dir bismark_${meta.sample_id} ${readArgs}
-    BAM=\$(find bismark_${meta.sample_id} -name '*_bismark_bt2*.bam' | head -n1)
-    test -n "\${BAM}"
-    deduplicate_bismark --bam ${dedupMode} --output_dir . \${BAM}
-    DEDUP=\$(find . -maxdepth 1 -name '*.deduplicated.bam' | head -n1)
-    test -n "\${DEDUP}"
-    samtools sort -n -@ ${task.cpus} -o ${meta.sample_id}.deduplicated.name.pre-mapq.bam \${DEDUP}
-    python3 ${projectDir}/bin/filter_paired_bam.py \
-      --input ${meta.sample_id}.deduplicated.name.pre-mapq.bam \
-      --output ${meta.sample_id}.mapq${params.mapq}.deduplicated.name.bam \
-      --mapq ${params.mapq} ${pairArg} \
-      --stats ${meta.sample_id}.wgbs_pair_filter.json
-    samtools quickcheck -v ${meta.sample_id}.mapq${params.mapq}.deduplicated.name.bam
-    rm -f ${meta.sample_id}.deduplicated.name.pre-mapq.bam
+    bash ${projectDir}/bin/stream_wgbs_bwameth.sh \
+      '${meta.sample_id}' \
+      '${reads[0]}' \
+      '${reads[1]}' \
+      '${meta.read1_md5}' \
+      '${meta.read2_md5}' \
+      '${refdir}/hg19.fa' \
+      '${pace_bed}' \
+      '${params.mapq}' \
+      '${task.cpus}'
     """
     stub:
     """
-    touch ${meta.sample_id}.mapq${params.mapq}.deduplicated.name.bam
-    echo '{"mapq_threshold":${params.mapq},"paired":${meta.paired}}' > ${meta.sample_id}.wgbs_pair_filter.json
+    touch ${meta.sample_id}.mapq${params.mapq}.pace-targets.deduplicated.bam
+    touch ${meta.sample_id}.mapq${params.mapq}.pace-targets.deduplicated.bam.bai
+    echo '{}' > ${meta.sample_id}.fastp.json
+    echo '<html></html>' > ${meta.sample_id}.fastp.html
+    echo '0 + 0 mapped' > ${meta.sample_id}.pace-targets.flagstat.txt
     """
 }
 
-process EXTRACT_METHYLATION {
+process EXTRACT_METHYLATION_STREAM {
     tag "${meta.sample_id}"
     label 'big_mem'
     publishDir "${params.outdir}/methylation", mode: 'copy'
     input:
-    tuple val(meta), path(bam)
+    tuple val(meta), path(bam), path(bai)
+    path refdir
     output:
     tuple val(meta), path("${meta.sample_id}.bismark.cov.gz"), emit: cov
     script:
-    def pairedArg = meta.paired ? '--paired-end' : '--single-end'
     """
     set -euo pipefail
-    bismark_methylation_extractor ${pairedArg} --comprehensive --gzip --bedGraph ${bam}
-    COV=\$(find . -name '*.bismark.cov.gz' | head -n1)
-    test -n "\${COV}"
-    mv \${COV} ${meta.sample_id}.bismark.cov.gz
+    micromamba run -n methyldackel MethylDackel extract \
+      -q ${params.mapq} -p 5 --minDepth 1 -@ ${task.cpus} \
+      ${refdir}/hg19.fa ${bam} -o ${meta.sample_id}.methyldackel
+    test -s ${meta.sample_id}.methyldackel_CpG.bedGraph
+    python3 ${projectDir}/bin/methyldackel_to_bismark.py \
+      --input ${meta.sample_id}.methyldackel_CpG.bedGraph \
+      --output ${meta.sample_id}.bismark.cov.gz
     gzip -t ${meta.sample_id}.bismark.cov.gz
     """
     stub:
@@ -267,7 +329,12 @@ WT_rep1_WGBS,WT,1,1.00,DunedinPACE
 SIRT1_rep1_WGBS,SIRT1,1,1.10,DunedinPACE
 SIRT2_rep1_WGBS,SIRT2,1,1.20,DunedinPACE
 EOF
-    echo 'sample_id,matched_probes,required_probes,fraction,min_cpg_depth' > pace_probe_qc.csv
+    cat > pace_probe_qc.csv <<'EOF'
+sample_id,matched_probes,required_probes,fraction,min_cpg_depth
+WT_rep1_WGBS,20000,20000,1.0,6
+SIRT1_rep1_WGBS,20000,20000,1.0,6
+SIRT2_rep1_WGBS,20000,20000,1.0,6
+EOF
     cat > pace_model_metadata.csv <<'EOF'
 model,intercept,required_background_probes,annotation,source_package
 DunedinPACE,-1.949859,20000,IlluminaHumanMethylationEPICanno.ilm10b4.hg19,danbelsky/DunedinPACE@4b569983543e51d1022aecec9a25e694bb3a336a
@@ -336,7 +403,7 @@ process MANIFEST {
     path correlations
     path model_metadata
     output:
-    path 'manifest.json'
+    path 'manifest.json', emit: manifest
     script:
     """
     set -euo pipefail
@@ -351,12 +418,43 @@ process MANIFEST {
     """
     stub:
     """
-    echo '{}' > manifest.json
+    cat > manifest.json <<'EOF'
+{"alignment":{"mapq_threshold":30},"peak_calling":{"fdr":0.01},"cutrun":{"fdr":0.05}}
+EOF
+    """
+}
+
+process REPORT {
+    tag 'supplementary-report'
+    publishDir "${params.outdir}", mode: 'copy'
+    input:
+    path scores
+    path occupancy
+    path correlations
+    path manifest
+    path pace_qc
+    output:
+    path 'supplementary_report.pdf', emit: pdf
+    script:
+    """
+    set -euo pipefail
+    python3 ${projectDir}/bin/generate_report.py \
+      --scores ${scores} \
+      --occupancy ${occupancy} \
+      --correlations ${correlations} \
+      --manifest ${manifest} \
+      --pace-qc ${pace_qc} \
+      --output supplementary_report.pdf
+    test -s supplementary_report.pdf
+    """
+    stub:
+    """
+    printf '%s' '%PDF-1.4 stub' > supplementary_report.pdf
     """
 }
 
 workflow {
-    samples = Channel.fromPath(params.samplesheet, checkIfExists: true).splitCsv(header: true).map { row ->
+    primary = Channel.fromPath(params.samplesheet, checkIfExists: true).splitCsv(header: true).map { row ->
         def meta = [
             sample_id: row.sample_id,
             condition: row.condition,
@@ -403,37 +501,44 @@ workflow {
         tuple(meta, reads)
     }
 
-    all_reads = samples.mix(controls).mix(cutrun)
-    trimmed = FASTP(all_reads).trimmed
+    ref_queue = PREPARE_REFERENCE(Channel.value(params.reference_fasta_url)).refdir
+    ref_value = ref_queue.collect().map { items -> items[0] }
+    pace_queue = PREPARE_PACE_WINDOWS().bed
+    pace_value = pace_queue.collect().map { items -> items[0] }
+
+    wgbs_raw = primary.filter { meta, reads -> meta.assay == 'WGBS' }
+    chip_primary = primary.filter { meta, reads -> meta.assay == 'CHIP' }
+    non_wgbs = chip_primary.mix(controls).mix(cutrun)
+    trimmed = FASTP(non_wgbs).trimmed
 
     chip_and_input_trim = trimmed.filter { meta, reads -> meta.assay == 'CHIP' || meta.assay == 'INPUT' }
-    wgbs_trim = trimmed.filter { meta, reads -> meta.assay == 'WGBS' }
     cutrun_trim = trimmed.filter { meta, reads -> meta.assay == 'CUTRUN' }
 
-    chip_all_bam = ALIGN_CHIP(chip_and_input_trim).bam
+    chip_all_bam = ALIGN_CHIP(chip_and_input_trim, ref_value).bam
     chip_bam = chip_all_bam.filter { meta, bam, bai -> meta.assay == 'CHIP' }
     input_bam = chip_all_bam.filter { meta, bam, bai -> meta.assay == 'INPUT' }
     control_bams = input_bam.map { meta, bam, bai -> bam }.collect()
     peaks = CALL_PEAKS(chip_bam, control_bams).peaks
 
-    cutrun_all_bam = ALIGN_CUTRUN(cutrun_trim).bam
+    cutrun_all_bam = ALIGN_CUTRUN(cutrun_trim, ref_value).bam
     cutrun_target_bam = cutrun_all_bam.filter { meta, bam, bai -> meta.target == 'SIRT6' }
     cutrun_igg_bam = cutrun_all_bam.filter { meta, bam, bai -> meta.target == 'IgG' }
     cutrun_controls = cutrun_igg_bam.map { meta, bam, bai -> bam }.collect()
     cutrun_peaks = CALL_CUTRUN_PEAKS(cutrun_target_bam, cutrun_controls).peaks
     sirt6_loci = BUILD_SIRT6_LOCI(cutrun_peaks.map { meta, peak -> peak }.collect()).loci
 
-    wgbs_bam = ALIGN_WGBS(wgbs_trim).bam
-    cov = EXTRACT_METHYLATION(wgbs_bam).cov
-    pace_result = BUILD_PACE_MATRIX(cov.map { meta, path -> path }.collect())
+    wgbs_target_bam = ALIGN_WGBS_STREAM(wgbs_raw, ref_value, pace_value).bam
+    cov = EXTRACT_METHYLATION_STREAM(wgbs_target_bam, ref_value).cov
+    pace_result = BUILD_PACE_MATRIX(cov.map { meta, coverage -> coverage }.collect())
 
     occupancy = CHIP_OCCUPANCY(
-        peaks.map { meta, path -> path }.collect(),
+        peaks.map { meta, peak -> peak }.collect(),
         chip_bam.map { meta, bam, bai -> bam }.collect(),
         chip_bam.map { meta, bam, bai -> bai }.collect(),
         sirt6_loci
     ).occupancy
 
     corr = CORRELATE(pace_result.scores, occupancy).correlations
-    MANIFEST(corr, pace_result.model_metadata)
+    manifest = MANIFEST(corr, pace_result.model_metadata).manifest
+    REPORT(pace_result.scores, occupancy, corr, manifest, pace_result.qc)
 }
