@@ -1,16 +1,24 @@
 #!/usr/bin/env python3
-"""Compute differential H3K9ac/H3K56ac occupancy per sample.
+"""Compute global and SIRT6-locus H3K9ac/H3K56ac occupancy.
 
-Production execution counts DNA fragments in a pre-specified set of loci. For
-this bounty those loci are derived independently from SIRT6 CUT&RUN
-(HRA005392), avoiding a circular region definition based on the histone marks
-being correlated with DunedinPACE.
+Primary bounty endpoint
+-----------------------
+For each histone mark, a fixed peak universe is created from the union of all
+MACS3 peaks for that mark. Each sample is quantified over the same universe.
+The primary scalar is log2(fragment CPM + 1), centered on the WT mean for the
+same mark. The peak universe is defined without using DunedinPACE values.
+
+Secondary mechanistic endpoint
+------------------------------
+If --loci-bed is provided, the same fragment-level quantification is also
+computed over an independently defined SIRT6 CUT&RUN locus set (HRA005392).
+This is reported separately and never substituted silently for the primary
+endpoint.
 
 For paired-end libraries, only the primary read1 of each proper pair represents
 a fragment. For single-end libraries, each primary mapped read is a fragment.
-Query names are de-duplicated across loci so one long fragment cannot be counted
-more than once. The scalar is log2(fragment CPM + 1) minus the WT mean for the
-same mark. No target correlation value is used at any point.
+Query names are de-duplicated across regions so a fragment spanning more than
+one interval is counted once.
 """
 import argparse
 import csv
@@ -25,10 +33,10 @@ MARKS = ('H3K9ac', 'H3K56ac')
 
 
 def parse_sample(name):
-    m = SAMPLE_RE.search(Path(name).name)
-    if not m:
+    match = SAMPLE_RE.search(Path(name).name)
+    if not match:
         raise ValueError(f'cannot parse sample metadata from {name}')
-    return m.group(1), int(m.group(2)), m.group(3)
+    return match.group(1), int(match.group(2)), match.group(3)
 
 
 def merge_intervals(intervals):
@@ -38,15 +46,15 @@ def merge_intervals(intervals):
             continue
         by_chr[chrom].append((start, end))
     merged = {}
-    for chrom, xs in by_chr.items():
-        xs.sort()
+    for chrom, values in by_chr.items():
+        values.sort()
         out = []
-        for s, e in xs:
-            if not out or s > out[-1][1]:
-                out.append([s, e])
+        for start, end in values:
+            if not out or start > out[-1][1]:
+                out.append([start, end])
             else:
-                out[-1][1] = max(out[-1][1], e)
-        merged[chrom] = [(s, e) for s, e in out]
+                out[-1][1] = max(out[-1][1], end)
+        merged[chrom] = [(start, end) for start, end in out]
     return merged
 
 
@@ -68,13 +76,16 @@ def read_bed(path):
 
 def peak_union_by_mark(pattern):
     peaks_by_mark = defaultdict(list)
-    for fn in glob.glob(pattern):
-        _, _, mark = parse_sample(fn)
-        with open(fn, encoding='utf-8') as f:
-            for line in f:
+    files = sorted(glob.glob(pattern))
+    if not files:
+        raise ValueError(f'no peak files matched {pattern}')
+    for filename in files:
+        _, _, mark = parse_sample(filename)
+        with open(filename, encoding='utf-8') as handle:
+            for line in handle:
                 if line.strip():
-                    c, s, e, *_ = line.rstrip().split('\t')
-                    peaks_by_mark[mark].append((c, int(s), int(e)))
+                    chrom, start, end, *_ = line.rstrip().split('\t')
+                    peaks_by_mark[mark].append((chrom, int(start), int(end)))
     missing = [mark for mark in MARKS if not peaks_by_mark[mark]]
     if missing:
         raise ValueError(f'missing peak files/intervals for: {", ".join(missing)}')
@@ -91,12 +102,10 @@ def is_fragment_representative(read):
 
 
 def total_fragments(bam):
-    """Count usable fragments in the complete BAM."""
     return sum(1 for read in bam.fetch(until_eof=True) if is_fragment_representative(read))
 
 
 def fragments_in_regions(bam, regions):
-    """Count unique fragments overlapping any region."""
     names = set()
     for chrom, intervals in regions.items():
         if chrom not in bam.references:
@@ -108,74 +117,98 @@ def fragments_in_regions(bam, regions):
     return len(names)
 
 
+def log2_cpm(numerator, denominator):
+    if denominator < 1:
+        raise ValueError('fragment denominator must be positive')
+    return math.log2((numerator / denominator * 1_000_000.0) + 1.0)
+
+
+def center_on_wt(rows, value_key, output_key):
+    means = {}
+    for mark in MARKS:
+        values = [
+            row[value_key]
+            for row in rows
+            if row['condition'] == 'WT' and row['mark'] == mark and row[value_key] is not None
+        ]
+        if not values:
+            raise ValueError(f'missing WT controls for {mark} / {value_key}')
+        means[mark] = sum(values) / len(values)
+    for row in rows:
+        value = row[value_key]
+        row[output_key] = None if value is None else value - means[row['mark']]
+
+
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--peaks-glob', default='')
-    ap.add_argument('--bam-glob', required=True)
-    ap.add_argument('--loci-bed', default='')
-    ap.add_argument('--output', required=True)
-    a = ap.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--peaks-glob', required=True)
+    parser.add_argument('--bam-glob', required=True)
+    parser.add_argument('--loci-bed', default='')
+    parser.add_argument('--output', required=True)
+    args = parser.parse_args()
+
     try:
         import pysam
-    except ImportError as e:
-        raise SystemExit('pysam is required for production occupancy calculation') from e
+    except ImportError as exc:
+        raise SystemExit('pysam is required for production occupancy calculation') from exc
 
-    if a.loci_bed:
-        shared_loci = read_bed(a.loci_bed)
-        regions_by_mark = {mark: shared_loci for mark in MARKS}
-    else:
-        if not a.peaks_glob:
-            raise ValueError('either --loci-bed or --peaks-glob is required')
-        regions_by_mark = peak_union_by_mark(a.peaks_glob)
+    global_regions = peak_union_by_mark(args.peaks_glob)
+    sirt6_regions = read_bed(args.loci_bed) if args.loci_bed else None
 
-    raw = []
-    bam_files = sorted(glob.glob(a.bam_glob))
+    rows = []
+    bam_files = sorted(glob.glob(args.bam_glob))
     if not bam_files:
-        raise ValueError(f'no BAM files matched {a.bam_glob}')
+        raise ValueError(f'no BAM files matched {args.bam_glob}')
 
-    for bam_fn in bam_files:
-        cond, rep, mark = parse_sample(bam_fn)
-        # One sequential pass gives an exact fragment denominator; reopen for
-        # indexed regional fetches because until_eof advances the stream.
-        with pysam.AlignmentFile(bam_fn, 'rb') as bam:
+    for bam_filename in bam_files:
+        condition, replicate, mark = parse_sample(bam_filename)
+        with pysam.AlignmentFile(bam_filename, 'rb') as bam:
             denominator = total_fragments(bam)
         if denominator < 1:
-            raise ValueError(f'no usable mapped fragments in {bam_fn}')
+            raise ValueError(f'no usable mapped fragments in {bam_filename}')
 
-        with pysam.AlignmentFile(bam_fn, 'rb') as bam:
-            numerator = fragments_in_regions(bam, regions_by_mark[mark])
+        with pysam.AlignmentFile(bam_filename, 'rb') as bam:
+            global_count = fragments_in_regions(bam, global_regions[mark])
+        global_value = log2_cpm(global_count, denominator)
 
-        cpm = numerator / denominator * 1_000_000.0
-        raw.append({
-            'condition': cond,
-            'replicate': rep,
+        sirt6_value = None
+        sirt6_count = None
+        if sirt6_regions is not None:
+            with pysam.AlignmentFile(bam_filename, 'rb') as bam:
+                sirt6_count = fragments_in_regions(bam, sirt6_regions)
+            sirt6_value = log2_cpm(sirt6_count, denominator)
+
+        rows.append({
+            'condition': condition,
+            'replicate': replicate,
             'mark': mark,
-            'log2_cpm': math.log2(cpm + 1.0),
+            'total_fragments': denominator,
+            'global_fragments': global_count,
+            'global_log2_cpm': global_value,
+            'sirt6_fragments': sirt6_count,
+            'sirt6_log2_cpm': sirt6_value,
         })
 
-    wt_mean = {}
-    for mark in MARKS:
-        vals = [
-            row['log2_cpm'] for row in raw
-            if row['condition'] == 'WT' and row['mark'] == mark
-        ]
-        if not vals:
-            raise ValueError(f'missing WT controls for {mark}')
-        wt_mean[mark] = sum(vals) / len(vals)
+    # Primary acceptance metric: global fixed-universe occupancy.
+    center_on_wt(rows, 'global_log2_cpm', 'differential_occupancy')
+    center_on_wt(rows, 'global_log2_cpm', 'global_differential_occupancy')
+    if sirt6_regions is not None:
+        center_on_wt(rows, 'sirt6_log2_cpm', 'sirt6_differential_occupancy')
+    else:
+        for row in rows:
+            row['sirt6_differential_occupancy'] = None
 
-    for row in raw:
-        row['differential_occupancy'] = row['log2_cpm'] - wt_mean[row['mark']]
-
-    with open(a.output, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                'condition', 'replicate', 'mark',
-                'differential_occupancy', 'log2_cpm',
-            ],
-        )
+    fieldnames = [
+        'condition', 'replicate', 'mark',
+        'differential_occupancy',
+        'global_differential_occupancy', 'global_log2_cpm', 'global_fragments',
+        'sirt6_differential_occupancy', 'sirt6_log2_cpm', 'sirt6_fragments',
+        'total_fragments',
+    ]
+    with open(args.output, 'w', newline='', encoding='utf-8') as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(raw)
+        writer.writerows(rows)
 
 
 if __name__ == '__main__':
