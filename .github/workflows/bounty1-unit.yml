@@ -10,6 +10,10 @@ on:
       - 'bounty1/**'
       - '.github/workflows/bounty1-unit.yml'
 
+concurrency:
+  group: bounty1-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   unit:
     runs-on: ubuntu-latest
