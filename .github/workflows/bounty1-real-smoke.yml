@@ -2,11 +2,10 @@ name: Bounty 1 real-data smoke
 
 on:
   pull_request:
+    types: [reopened]
     paths:
       - '.github/workflows/bounty1-real-smoke.yml'
-      - 'bounty1/bin/extract_remote_fastq_prefix.py'
-      - 'bounty1/bin/filter_paired_bam.py'
-      - 'bounty1/Dockerfile'
+      - 'bounty1/**'
   workflow_dispatch:
 
 concurrency:
@@ -164,11 +163,13 @@ jobs:
             bismark --genome /smoke/ref/bismark --bowtie2 --parallel 1 \
               --output_dir /smoke/wgbs \
               -1 /smoke/trim/wgbs.R1.fastq.gz -2 /smoke/trim/wgbs.R2.fastq.gz \
-              > /smoke/qc/wgbs.bismark.stdout.log 2> /smoke/qc/wgbs.bismark.stderr.log
+              > >(tee /smoke/qc/wgbs.bismark.stdout.log) \
+              2> >(tee /smoke/qc/wgbs.bismark.stderr.log >&2)
             BAM=$(find /smoke/wgbs -name "*_bismark_bt2*.bam" | head -n1)
             test -n "$BAM"
             deduplicate_bismark --bam --paired-end --output_dir /smoke/wgbs "$BAM" \
-              > /smoke/qc/wgbs.dedup.stdout.log 2> /smoke/qc/wgbs.dedup.stderr.log
+              > >(tee /smoke/qc/wgbs.dedup.stdout.log) \
+              2> >(tee /smoke/qc/wgbs.dedup.stderr.log >&2)
             DEDUP=$(find /smoke/wgbs -name "*.deduplicated.bam" | head -n1)
             test -n "$DEDUP"
             samtools sort -n -@ 4 -o /smoke/wgbs/wgbs.deduplicated.name.pre-mapq.bam "$DEDUP"
@@ -180,7 +181,8 @@ jobs:
             test "$(samtools view -c /smoke/wgbs/wgbs.mapq30.deduplicated.name.bam)" -gt 0
             bismark_methylation_extractor --paired-end --comprehensive --gzip --bedGraph \
               --output /smoke/wgbs /smoke/wgbs/wgbs.mapq30.deduplicated.name.bam \
-              > /smoke/qc/wgbs.extract.stdout.log 2> /smoke/qc/wgbs.extract.stderr.log
+              > >(tee /smoke/qc/wgbs.extract.stdout.log) \
+              2> >(tee /smoke/qc/wgbs.extract.stderr.log >&2)
             COV=$(find /smoke/wgbs -name "*.bismark.cov.gz" | head -n1)
             test -n "$COV"
             gzip -t "$COV"
@@ -190,7 +192,9 @@ jobs:
           '
 
       - name: Record smoke-test scope
+        if: always()
         run: |
+          mkdir -p real-smoke/qc
           cat > real-smoke/qc/README.txt <<'EOF'
           REAL-DATA TECHNICAL SMOKE TEST ONLY
           ===================================
@@ -207,9 +211,10 @@ jobs:
           EOF
 
       - name: Upload real-data smoke evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: bounty1-real-data-smoke-chr22
           path: real-smoke/qc
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
