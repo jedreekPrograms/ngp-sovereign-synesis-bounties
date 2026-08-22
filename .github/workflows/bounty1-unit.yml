@@ -42,7 +42,12 @@ jobs:
           from pathlib import Path
 
           urls = []
-          for sheet in (Path('bounty1/resources/samplesheet.csv'), Path('bounty1/resources/chip_inputs.csv')):
+          sheets = (
+              Path('bounty1/resources/samplesheet.csv'),
+              Path('bounty1/resources/chip_inputs.csv'),
+              Path('bounty1/resources/sirt6_cutrun.csv'),
+          )
+          for sheet in sheets:
               with sheet.open(newline='', encoding='utf-8') as fh:
                   for row in csv.DictReader(fh):
                       for key in ('fastq_1', 'fastq_2'):
