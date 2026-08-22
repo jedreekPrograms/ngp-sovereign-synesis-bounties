@@ -18,9 +18,17 @@ jobs:
     timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
 
-      - name: Build pinned analysis image
-        run: docker build --pull -t bounty1-pace:real-smoke bounty1
+      - name: Build pinned analysis image with shared GHA cache
+        uses: docker/build-push-action@v6
+        with:
+          context: bounty1
+          load: true
+          pull: true
+          tags: bounty1-pace:real-smoke
+          cache-from: type=gha,scope=bounty1-docker
+          cache-to: type=gha,mode=max,scope=bounty1-docker
 
       - name: Download hg19 chr22 reference
         run: |
@@ -180,7 +188,7 @@ jobs:
             samtools quickcheck -v /smoke/wgbs/wgbs.mapq30.deduplicated.name.bam
             test "$(samtools view -c /smoke/wgbs/wgbs.mapq30.deduplicated.name.bam)" -gt 0
             bismark_methylation_extractor --paired-end --comprehensive --gzip --bedGraph \
-              --output /smoke/wgbs /smoke/wgbs/wgbs.mapq30.deduplicated.name.bam \
+              --output_dir /smoke/wgbs /smoke/wgbs/wgbs.mapq30.deduplicated.name.bam \
               > >(tee /smoke/qc/wgbs.extract.stdout.log) \
               2> >(tee /smoke/qc/wgbs.extract.stderr.log >&2)
             COV=$(find /smoke/wgbs -name "*.bismark.cov.gz" | head -n1)
