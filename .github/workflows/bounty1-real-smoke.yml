@@ -167,7 +167,7 @@ jobs:
               2> >(tee /smoke/qc/wgbs.bismark.stderr.log >&2)
             BAM=$(find /smoke/wgbs -name "*_bismark_bt2*.bam" | head -n1)
             test -n "$BAM"
-            deduplicate_bismark --bam --paired-end --output_dir /smoke/wgbs "$BAM" \
+            deduplicate_bismark --bam --paired --output_dir /smoke/wgbs "$BAM" \
               > >(tee /smoke/qc/wgbs.dedup.stdout.log) \
               2> >(tee /smoke/qc/wgbs.dedup.stderr.log >&2)
             DEDUP=$(find /smoke/wgbs -name "*.deduplicated.bam" | head -n1)
