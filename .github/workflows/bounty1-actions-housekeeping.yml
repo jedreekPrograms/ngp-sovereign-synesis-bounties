@@ -1,0 +1,61 @@
+name: Bounty 1 Actions housekeeping
+
+on:
+  pull_request:
+    types: [synchronize]
+    paths:
+      - '.github/workflows/bounty1-actions-housekeeping.yml'
+      - '.github/workflows/bounty1-full-wgbs-benchmark.yml'
+      - '.github/workflows/bounty1-full-chromatin-benchmark.yml'
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cancel-duplicate-expensive-runs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Keep at most one active run per expensive benchmark
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          clean_workflow() {
+            local workflow="$1"
+            local json
+            json=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?branch=${GITHUB_HEAD_REF}&per_page=50")
+
+            mapfile -t in_progress < <(
+              jq -r '.workflow_runs[] | select(.status == "in_progress") | [.created_at, (.id|tostring)] | @tsv' \
+                <<<"$json" | sort | cut -f2
+            )
+            mapfile -t queued < <(
+              jq -r '.workflow_runs[] | select(.status == "queued" or .status == "requested" or .status == "waiting" or .status == "pending") | [.created_at, (.id|tostring)] | @tsv' \
+                <<<"$json" | sort | cut -f2
+            )
+
+            if (( ${#in_progress[@]} > 0 )); then
+              echo "${workflow}: active run ${in_progress[0]} exists; cancelling ${#queued[@]} queued duplicate(s)."
+              for run_id in "${queued[@]}"; do
+                gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/cancel" >/dev/null || true
+              done
+              return
+            fi
+
+            if (( ${#queued[@]} <= 1 )); then
+              echo "${workflow}: no duplicate queued runs."
+              return
+            fi
+
+            echo "${workflow}: keeping oldest queued run ${queued[0]} and cancelling later duplicates."
+            for run_id in "${queued[@]:1}"; do
+              gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/cancel" >/dev/null || true
+            done
+          }
+
+          clean_workflow bounty1-full-wgbs-benchmark.yml
+          clean_workflow bounty1-full-chromatin-benchmark.yml
