@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Compute differential H3K9ac/H3K56ac occupancy per sample.
 
-Production execution uses pysam to count mapped fragments in a pre-specified
-set of loci. For the bounty analysis those loci are derived independently from
-SIRT6 CUT&RUN (HRA005392), avoiding a circular definition based on the histone
-marks being correlated with DunedinPACE.
+Production execution counts DNA fragments in a pre-specified set of loci. For
+this bounty those loci are derived independently from SIRT6 CUT&RUN
+(HRA005392), avoiding a circular region definition based on the histone marks
+being correlated with DunedinPACE.
 
-If --loci-bed is omitted, the script falls back to the union of MACS3 peaks for
-each histone mark. The scalar is log2(CPM + 1) minus the WT mean for the same
-mark. No target correlation value is used at any point.
+For paired-end libraries, only the primary read1 of each proper pair represents
+a fragment. For single-end libraries, each primary mapped read is a fragment.
+Query names are de-duplicated across loci so one long fragment cannot be counted
+more than once. The scalar is log2(fragment CPM + 1) minus the WT mean for the
+same mark. No target correlation value is used at any point.
 """
 import argparse
 import csv
@@ -79,6 +81,33 @@ def peak_union_by_mark(pattern):
     return {mark: merge_intervals(peaks_by_mark[mark]) for mark in MARKS}
 
 
+def is_fragment_representative(read):
+    """Return True exactly once per usable DNA fragment."""
+    if read.is_unmapped or read.is_secondary or read.is_supplementary:
+        return False
+    if read.is_paired:
+        return read.is_proper_pair and read.is_read1
+    return True
+
+
+def total_fragments(bam):
+    """Count usable fragments in the complete BAM."""
+    return sum(1 for read in bam.fetch(until_eof=True) if is_fragment_representative(read))
+
+
+def fragments_in_regions(bam, regions):
+    """Count unique fragments overlapping any region."""
+    names = set()
+    for chrom, intervals in regions.items():
+        if chrom not in bam.references:
+            continue
+        for start, end in intervals:
+            for read in bam.fetch(chrom, start, end):
+                if is_fragment_representative(read):
+                    names.add(read.query_name)
+    return len(names)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--peaks-glob', default='')
@@ -106,26 +135,23 @@ def main():
 
     for bam_fn in bam_files:
         cond, rep, mark = parse_sample(bam_fn)
+        # One sequential pass gives an exact fragment denominator; reopen for
+        # indexed regional fetches because until_eof advances the stream.
         with pysam.AlignmentFile(bam_fn, 'rb') as bam:
-            count = 0
-            for chrom, intervals in regions_by_mark[mark].items():
-                if chrom not in bam.references:
-                    continue
-                for start, end in intervals:
-                    count += bam.count(
-                        contig=chrom,
-                        start=start,
-                        end=end,
-                        read_callback='all',
-                    )
-            mapped = max(bam.mapped, 1)
-            cpm = count / mapped * 1_000_000.0
-            raw.append({
-                'condition': cond,
-                'replicate': rep,
-                'mark': mark,
-                'log2_cpm': math.log2(cpm + 1.0),
-            })
+            denominator = total_fragments(bam)
+        if denominator < 1:
+            raise ValueError(f'no usable mapped fragments in {bam_fn}')
+
+        with pysam.AlignmentFile(bam_fn, 'rb') as bam:
+            numerator = fragments_in_regions(bam, regions_by_mark[mark])
+
+        cpm = numerator / denominator * 1_000_000.0
+        raw.append({
+            'condition': cond,
+            'replicate': rep,
+            'mark': mark,
+            'log2_cpm': math.log2(cpm + 1.0),
+        })
 
     wt_mean = {}
     for mark in MARKS:
