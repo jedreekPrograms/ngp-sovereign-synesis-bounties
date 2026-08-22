@@ -26,6 +26,20 @@ jobs:
       - run: pytest bounty1/tests -q
       - run: python bounty1/bin/validate_samplesheet.py bounty1/resources/samplesheet.csv --controls-sheet bounty1/resources/chip_inputs.csv
 
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install static-analysis tools
+        run: pip install ruff bandit
+      - name: Ruff production and unit code
+        run: ruff check --select E,F bounty1/bin bounty1/tests
+      - name: Bandit medium/high findings
+        run: bandit -q -ll -r bounty1/bin
+
   data-probe:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -56,7 +70,7 @@ jobs:
         run: docker run --rm bounty1-pace:ci python bin/validate_samplesheet.py resources/samplesheet.csv --controls-sheet resources/chip_inputs.csv
       - name: Verify upstream DunedinPACE model is installed
         run: |
-          docker run --rm bounty1-pace:ci R -q -e "library(DunedinPACE); stopifnot(length(mPACE_Models\$model_names) > 0); stopifnot(all(is.finite(unlist(mPACE_Models\$model_intercept)))); print(mPACE_Models\$model_intercept)"
+          docker run --rm bounty1-pace:ci R -q -e "library(DunedinPACE); model_probes <- unique(unlist(getRequiredProbes(FALSE))); background <- unique(unlist(getRequiredProbes(TRUE))); stopifnot(length(mPACE_Models\$model_names) > 0); stopifnot(all(is.finite(unlist(mPACE_Models\$model_intercept)))); stopifnot(all(model_probes %in% background)); print(mPACE_Models\$model_intercept)"
       - name: Execute streaming + MD5 helper on real gzip FASTQ bytes
         run: |
           docker run --rm bounty1-pace:ci bash -lc '

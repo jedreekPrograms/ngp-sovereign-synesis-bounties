@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Stream one or two gzip-compressed FASTQ sources into fastp while calculating
-# the archive MD5 on the exact compressed byte stream. Compressed input bytes
-# are decompressed on the fly into plain-FASTQ FIFOs, so the remote archives
-# are never materialized on disk and fastp does not need to seek/re-open a gzip
-# FIFO (which is not supported reliably by its igzip reader).
+# Stream one or two gzip-compressed FASTQ sources through fastp while
+# validating archive MD5 on the exact compressed bytes. Paired input is
+# converted to an interleaved plain-FASTQ stream and read by fastp from STDIN,
+# avoiding named-pipe seek/deadlock behaviour and avoiding raw FASTQ staging.
 #
 # Usage:
 #   stream_fastp.sh SAMPLE_ID R1_SOURCE R2_SOURCE R1_MD5 R2_MD5 THREADS
@@ -21,82 +20,30 @@ r2_source="$3"
 r1_expected="${4,,}"
 r2_expected="${5,,}"
 threads="$6"
-
-stream_source() {
-  local src="$1"
-  case "$src" in
-    http://*|https://*|ftp://*)
-      curl --fail --location --retry 5 --retry-delay 5 --connect-timeout 30 "$src"
-      ;;
-    *)
-      cat "$src"
-      ;;
-  esac
-}
-
-verify_md5() {
-  local expected="$1"
-  local actual_file="$2"
-  local label="$3"
-  [[ -z "$expected" ]] && return 0
-  local actual
-  actual="$(tr -d '[:space:]' < "$actual_file")"
-  if [[ "$actual" != "$expected" ]]; then
-    echo "MD5 mismatch for ${label}: expected ${expected}, got ${actual}" >&2
-    return 1
-  fi
-  echo "MD5 OK: ${label} ${actual}"
-}
-
-cleanup() {
-  rm -f r1.fastp.fq r1.md5.fifo r2.fastp.fq r2.md5.fifo
-}
-trap cleanup EXIT
-
-# Keep the MD5 calculation on the original compressed bytes, then decompress
-# the same byte stream before handing it to fastp. A plain FASTQ FIFO avoids
-# fastp/igzip attempting seek-like gzip probing on a named pipe.
-mkfifo r1.fastp.fq r1.md5.fifo
-(
-  stream_source "$r1_source" | tee r1.md5.fifo | gzip -dc > r1.fastp.fq
-) &
-r1_stream_pid=$!
-(
-  md5sum < r1.md5.fifo | awk '{print $1}' > r1.actual.md5
-) &
-r1_md5_pid=$!
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ -n "$r2_source" ]]; then
-  mkfifo r2.fastp.fq r2.md5.fifo
-  (
-    stream_source "$r2_source" | tee r2.md5.fifo | gzip -dc > r2.fastp.fq
-  ) &
-  r2_stream_pid=$!
-  (
-    md5sum < r2.md5.fifo | awk '{print $1}' > r2.actual.md5
-  ) &
-  r2_md5_pid=$!
-
+  python3 "${script_dir}/stream_interleaved_fastq.py" \
+    --r1-source "$r1_source" \
+    --r2-source "$r2_source" \
+    --r1-md5 "$r1_expected" \
+    --r2-md5 "$r2_expected" | \
   fastp \
-    -i r1.fastp.fq \
-    -I r2.fastp.fq \
+    --stdin \
+    --interleaved_in \
     -o "${sample_id}.trimmed.R1.fastq.gz" \
     -O "${sample_id}.trimmed.R2.fastq.gz" \
     --json "${sample_id}.fastp.json" \
     --html "${sample_id}.fastp.html" \
     --thread "$threads"
-
-  wait "$r1_stream_pid" "$r1_md5_pid" "$r2_stream_pid" "$r2_md5_pid"
-  verify_md5 "$r2_expected" r2.actual.md5 "${sample_id} R2"
 else
+  python3 "${script_dir}/stream_interleaved_fastq.py" \
+    --r1-source "$r1_source" \
+    --r1-md5 "$r1_expected" | \
   fastp \
-    -i r1.fastp.fq \
+    --stdin \
     -o "${sample_id}.trimmed.R1.fastq.gz" \
     --json "${sample_id}.fastp.json" \
     --html "${sample_id}.fastp.html" \
     --thread "$threads"
-
-  wait "$r1_stream_pid" "$r1_md5_pid"
 fi
-
-verify_md5 "$r1_expected" r1.actual.md5 "${sample_id} R1"
