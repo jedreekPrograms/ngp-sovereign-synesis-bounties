@@ -1,0 +1,217 @@
+name: Bounty 1 real-data smoke
+
+on:
+  push:
+    branches:
+      - bounty-1-real-pipeline
+    paths:
+      - '.github/workflows/bounty1-real-smoke.yml'
+      - 'bounty1/bin/extract_remote_fastq_prefix.py'
+      - 'bounty1/bin/filter_paired_bam.py'
+      - 'bounty1/Dockerfile'
+  workflow_dispatch:
+
+concurrency:
+  group: bounty1-real-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  chr22-real-data-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build pinned analysis image
+        run: docker build --pull -t bounty1-pace:real-smoke bounty1
+
+      - name: Download hg19 chr22 reference
+        run: |
+          set -euo pipefail
+          mkdir -p real-smoke/ref real-smoke/raw real-smoke/trim real-smoke/chip real-smoke/cutrun real-smoke/wgbs real-smoke/qc
+          curl -fsSL --retry 3 --retry-delay 2 \
+            -o real-smoke/ref/chr22.fa.gz \
+            https://hgdownload.soe.ucsc.edu/goldenPath/hg19/chromosomes/chr22.fa.gz
+          gzip -d real-smoke/ref/chr22.fa.gz
+          test -s real-smoke/ref/chr22.fa
+          sha256sum real-smoke/ref/chr22.fa > real-smoke/qc/chr22.fa.sha256
+
+      - name: Extract bounded prefixes from real public FASTQ files
+        env:
+          N_READS: '75000'
+        run: |
+          set -euo pipefail
+          extract_pair() {
+            sample="$1"; r1="$2"; r2="$3"
+            python bounty1/bin/extract_remote_fastq_prefix.py \
+              --url1 "$r1" --url2 "$r2" \
+              --out1 "real-smoke/raw/${sample}.R1.fastq.gz" \
+              --out2 "real-smoke/raw/${sample}.R2.fastq.gz" \
+              --reads "$N_READS" \
+              --metadata "real-smoke/qc/${sample}.source.json"
+          }
+
+          extract_pair chip \
+            https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202646/HRR1202646_f1.fq.gz \
+            https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202646/HRR1202646_r2.fq.gz
+          extract_pair input \
+            https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202672/HRR1202672_f1.fq.gz \
+            https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202672/HRR1202672_r2.fq.gz
+          extract_pair cutrun \
+            https://download.cncb.ac.cn/gsa-human/HRA005392/HRR1354863/HRR1354863_f1.fq.gz \
+            https://download.cncb.ac.cn/gsa-human/HRA005392/HRR1354863/HRR1354863_r2.fq.gz
+          extract_pair igg \
+            https://download.cncb.ac.cn/gsa-human/HRA005392/HRR1354851/HRR1354851_f1.fq.gz \
+            https://download.cncb.ac.cn/gsa-human/HRA005392/HRR1354851/HRR1354851_r2.fq.gz
+          extract_pair wgbs \
+            https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202752/HRR1202752_f1.fq.gz \
+            https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202752/HRR1202752_r2.fq.gz
+
+          du -sh real-smoke/raw | tee real-smoke/qc/partial-fastq-size.txt
+
+      - name: Build chr22 Bowtie2 and Bismark indexes
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/real-smoke:/smoke" bounty1-pace:real-smoke bash -lc '
+            set -euo pipefail
+            bowtie2-build /smoke/ref/chr22.fa /smoke/ref/chr22 > /smoke/qc/bowtie2-build.log 2>&1
+            mkdir -p /smoke/ref/bismark
+            cp /smoke/ref/chr22.fa /smoke/ref/bismark/chr22.fa
+            bismark_genome_preparation --bowtie2 /smoke/ref/bismark > /smoke/qc/bismark-genome-preparation.log 2>&1
+          '
+
+      - name: Trim real read prefixes with fastp
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/real-smoke:/smoke" bounty1-pace:real-smoke bash -lc '
+            set -euo pipefail
+            for sample in chip input cutrun igg wgbs; do
+              fastp \
+                -i /smoke/raw/${sample}.R1.fastq.gz \
+                -I /smoke/raw/${sample}.R2.fastq.gz \
+                -o /smoke/trim/${sample}.R1.fastq.gz \
+                -O /smoke/trim/${sample}.R2.fastq.gz \
+                -j /smoke/qc/${sample}.fastp.json \
+                -h /smoke/qc/${sample}.fastp.html \
+                -w 4
+            done
+          '
+
+      - name: Align real ChIP and INPUT prefixes and invoke MACS3
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/real-smoke:/smoke" bounty1-pace:real-smoke bash -lc '
+            set -euo pipefail
+            align_dedup() {
+              sample="$1"
+              bowtie2 --very-sensitive -x /smoke/ref/chr22 \
+                -1 /smoke/trim/${sample}.R1.fastq.gz \
+                -2 /smoke/trim/${sample}.R2.fastq.gz -p 4 2> /smoke/qc/${sample}.bowtie2.log | \
+                samtools view -b - | samtools sort -n -@ 4 -o /smoke/${sample}.name.bam
+              samtools fixmate -m /smoke/${sample}.name.bam /smoke/${sample}.fixmate.bam
+              samtools sort -@ 4 -o /smoke/${sample}.position.bam /smoke/${sample}.fixmate.bam
+              samtools markdup -r -@ 4 /smoke/${sample}.position.bam /smoke/${sample}.dedup.bam
+              samtools view -b -q 30 /smoke/${sample}.dedup.bam | samtools sort -@ 4 -o /smoke/${sample}.mapq30.bam
+              samtools index /smoke/${sample}.mapq30.bam
+              samtools flagstat /smoke/${sample}.mapq30.bam > /smoke/qc/${sample}.flagstat.txt
+              test "$(samtools view -c /smoke/${sample}.mapq30.bam)" -gt 0
+              rm -f /smoke/${sample}.name.bam /smoke/${sample}.fixmate.bam /smoke/${sample}.position.bam /smoke/${sample}.dedup.bam
+            }
+            align_dedup chip
+            align_dedup input
+            mv /smoke/chip.mapq30.bam* /smoke/chip/
+            mv /smoke/input.mapq30.bam* /smoke/chip/
+            cd /smoke/chip
+            macs3 callpeak -t chip.mapq30.bam -c input.mapq30.bam -f BAMPE -g hs \
+              -n real_chip_chr22_prefix -q 0.01 --keep-dup all -B > /smoke/qc/chip.macs3.log 2>&1
+            test -f real_chip_chr22_prefix_peaks.narrowPeak
+          '
+
+      - name: Align real CUT&RUN and IgG prefixes and invoke MACS3
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/real-smoke:/smoke" bounty1-pace:real-smoke bash -lc '
+            set -euo pipefail
+            align_cutrun() {
+              sample="$1"
+              bowtie2 --very-sensitive --no-mixed --no-discordant --dovetail \
+                -x /smoke/ref/chr22 \
+                -1 /smoke/trim/${sample}.R1.fastq.gz \
+                -2 /smoke/trim/${sample}.R2.fastq.gz -p 4 2> /smoke/qc/${sample}.bowtie2.log | \
+                samtools view -b - | samtools sort -n -@ 4 -o /smoke/${sample}.name.bam
+              samtools fixmate -m /smoke/${sample}.name.bam /smoke/${sample}.fixmate.bam
+              samtools sort -@ 4 -o /smoke/${sample}.position.bam /smoke/${sample}.fixmate.bam
+              samtools markdup -r -@ 4 /smoke/${sample}.position.bam /smoke/${sample}.dedup.bam
+              samtools view -b -q 30 /smoke/${sample}.dedup.bam | samtools sort -@ 4 -o /smoke/${sample}.mapq30.bam
+              samtools index /smoke/${sample}.mapq30.bam
+              samtools flagstat /smoke/${sample}.mapq30.bam > /smoke/qc/${sample}.flagstat.txt
+              test "$(samtools view -c /smoke/${sample}.mapq30.bam)" -gt 0
+              rm -f /smoke/${sample}.name.bam /smoke/${sample}.fixmate.bam /smoke/${sample}.position.bam /smoke/${sample}.dedup.bam
+            }
+            align_cutrun cutrun
+            align_cutrun igg
+            mv /smoke/cutrun.mapq30.bam* /smoke/cutrun/
+            mv /smoke/igg.mapq30.bam* /smoke/cutrun/
+            cd /smoke/cutrun
+            macs3 callpeak -t cutrun.mapq30.bam -c igg.mapq30.bam -f BAMPE -g hs \
+              -n real_sirt6_chr22_prefix -q 0.05 --keep-dup all --call-summits > /smoke/qc/cutrun.macs3.log 2>&1
+            test -f real_sirt6_chr22_prefix_peaks.narrowPeak
+          '
+
+      - name: Align real WGBS prefix and extract paired methylation
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/real-smoke:/smoke" bounty1-pace:real-smoke bash -lc '
+            set -euo pipefail
+            bismark --genome /smoke/ref/bismark --bowtie2 --parallel 1 \
+              --output_dir /smoke/wgbs \
+              -1 /smoke/trim/wgbs.R1.fastq.gz -2 /smoke/trim/wgbs.R2.fastq.gz \
+              > /smoke/qc/wgbs.bismark.stdout.log 2> /smoke/qc/wgbs.bismark.stderr.log
+            BAM=$(find /smoke/wgbs -name "*_bismark_bt2*.bam" | head -n1)
+            test -n "$BAM"
+            deduplicate_bismark --bam --paired --output_dir /smoke/wgbs "$BAM" \
+              > /smoke/qc/wgbs.dedup.stdout.log 2> /smoke/qc/wgbs.dedup.stderr.log
+            DEDUP=$(find /smoke/wgbs -name "*.deduplicated.bam" | head -n1)
+            test -n "$DEDUP"
+            samtools sort -n -@ 4 -o /smoke/wgbs/wgbs.deduplicated.name.pre-mapq.bam "$DEDUP"
+            python3 /work/bin/filter_paired_bam.py \
+              --input /smoke/wgbs/wgbs.deduplicated.name.pre-mapq.bam \
+              --output /smoke/wgbs/wgbs.mapq30.deduplicated.name.bam \
+              --mapq 30 --paired --stats /smoke/qc/wgbs.pair-filter.json
+            samtools quickcheck -v /smoke/wgbs/wgbs.mapq30.deduplicated.name.bam
+            test "$(samtools view -c /smoke/wgbs/wgbs.mapq30.deduplicated.name.bam)" -gt 0
+            bismark_methylation_extractor --paired-end --comprehensive --gzip --bedGraph \
+              --output /smoke/wgbs /smoke/wgbs/wgbs.mapq30.deduplicated.name.bam \
+              > /smoke/qc/wgbs.extract.stdout.log 2> /smoke/qc/wgbs.extract.stderr.log
+            COV=$(find /smoke/wgbs -name "*.bismark.cov.gz" | head -n1)
+            test -n "$COV"
+            gzip -t "$COV"
+            test "$(gzip -cd "$COV" | wc -l)" -gt 0
+            gzip -cd "$COV" | head -n 1000 > /smoke/qc/wgbs.coverage.head.tsv || true
+            printf "%s\n" "$COV" > /smoke/qc/wgbs.coverage.path.txt
+          '
+
+      - name: Record smoke-test scope
+        run: |
+          cat > real-smoke/qc/README.txt <<'EOF'
+          REAL-DATA TECHNICAL SMOKE TEST ONLY
+          ===================================
+          Sources: HRA003336 and HRA005392 public FASTQ files.
+          Reference: UCSC hg19 chromosome 22 only.
+          Input: first 75,000 paired FASTQ records per selected library.
+          Purpose: validate real archive streaming/parsing, trimming, alignment,
+          deduplication, MAPQ filtering, MACS3 invocation, Bismark pair-aware
+          filtering, and methylation extraction.
+
+          This smoke test is intentionally partial. It MUST NOT be used for or
+          reported as the final bounty biological correlation analysis.
+          Full-source MD5 values are not expected to match partial prefixes.
+          EOF
+
+      - name: Upload real-data smoke evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounty1-real-data-smoke-chr22
+          path: real-smoke/qc
+          if-no-files-found: error
+          retention-days: 14
