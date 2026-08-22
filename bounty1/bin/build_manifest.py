@@ -28,6 +28,8 @@ def main():
     ap.add_argument('--model-metadata', required=True)
     ap.add_argument('--mapq', required=True, type=int)
     ap.add_argument('--peak-fdr', required=True, type=float)
+    ap.add_argument('--cutrun-fdr', default=0.05, type=float)
+    ap.add_argument('--sirt6-min-reciprocal-overlap', default=0.50, type=float)
     ap.add_argument('--doi', default='')
     ap.add_argument('--docker-image', default='')
     ap.add_argument('--output', required=True)
@@ -56,7 +58,7 @@ def main():
                 'reproducible WT SIRT6 peaks across two replicates with '
                 'reproducible SIRT6-KO antibody peaks removed'
             ),
-            'minimum_reciprocal_overlap': 0.50,
+            'minimum_reciprocal_overlap': a.sirt6_min_reciprocal_overlap,
             'independent_of_histone_marks': True,
         },
         'dunedinpace': {
@@ -76,11 +78,13 @@ def main():
             'caller': 'macs3',
             'fdr': a.peak_fdr,
             'qvalue_threshold': a.peak_fdr,
+            'sirt6_cutrun_qvalue_threshold': a.cutrun_fdr,
         },
         'alignment': {
             'aligner': 'bowtie2/bismark',
             'reference_genome': 'hg19',
             'mapq_threshold': a.mapq,
+            'duplicate_policy': 'PCR duplicates removed before MAPQ filtering for ChIP-seq and CUT&RUN; Bismark deduplication for WGBS',
         },
         'data_deposit_doi': a.doi,
         'provenance': {
