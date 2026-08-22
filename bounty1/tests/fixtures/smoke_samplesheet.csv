@@ -1,0 +1,10 @@
+sample_id,condition,replicate,assay,mark,fastq_1,fastq_2
+WT_rep1_H3K9ac,WT,1,CHIP,H3K9ac,tests/fixtures/stub_R1.fastq.gz,tests/fixtures/stub_R2.fastq.gz
+WT_rep1_H3K56ac,WT,1,CHIP,H3K56ac,tests/fixtures/stub_R1.fastq.gz,tests/fixtures/stub_R2.fastq.gz
+WT_rep1_WGBS,WT,1,WGBS,,tests/fixtures/stub_R1.fastq.gz,tests/fixtures/stub_R2.fastq.gz
+SIRT1_rep1_H3K9ac,SIRT1,1,CHIP,H3K9ac,tests/fixtures/stub_R1.fastq.gz,tests/fixtures/stub_R2.fastq.gz
+SIRT1_rep1_H3K56ac,SIRT1,1,CHIP,H3K56ac,tests/fixtures/stub_R1.fastq.gz,tests/fixtures/stub_R2.fastq.gz
+SIRT1_rep1_WGBS,SIRT1,1,WGBS,,tests/fixtures/stub_R1.fastq.gz,tests/fixtures/stub_R2.fastq.gz
+SIRT2_rep1_H3K9ac,SIRT2,1,CHIP,H3K9ac,tests/fixtures/stub_R1.fastq.gz,tests/fixtures/stub_R2.fastq.gz
+SIRT2_rep1_H3K56ac,SIRT2,1,CHIP,H3K56ac,tests/fixtures/stub_R1.fastq.gz,tests/fixtures/stub_R2.fastq.gz
+SIRT2_rep1_WGBS,SIRT2,1,WGBS,,tests/fixtures/stub_R1.fastq.gz,tests/fixtures/stub_R2.fastq.gz
