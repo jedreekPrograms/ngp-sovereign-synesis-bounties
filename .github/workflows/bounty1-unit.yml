@@ -98,6 +98,22 @@ jobs:
       - name: Verify upstream DunedinPACE model is installed
         run: |
           docker run --rm bounty1-pace:ci R -q -e "library(DunedinPACE); stopifnot(length(mPACE_Models\$model_names) > 0); stopifnot(all(is.finite(unlist(mPACE_Models\$model_intercept)))); print(mPACE_Models\$model_intercept)"
+      - name: Execute streaming + MD5 helper on real gzip FASTQ bytes
+        run: |
+          docker run --rm bounty1-pace:ci bash -lc '
+            set -euo pipefail
+            tmp=$(mktemp -d)
+            cd "$tmp"
+            printf "@read1/1\nACGTACGTACGTACGTACGT\n+\nIIIIIIIIIIIIIIIIIIII\n" | gzip -c > R1.fq.gz
+            printf "@read1/2\nTGCATGCATGCATGCATGCA\n+\nIIIIIIIIIIIIIIIIIIII\n" | gzip -c > R2.fq.gz
+            m1=$(md5sum R1.fq.gz | awk "{print \$1}")
+            m2=$(md5sum R2.fq.gz | awk "{print \$1}")
+            bash /work/bin/stream_fastp.sh smoke R1.fq.gz R2.fq.gz "$m1" "$m2" 2
+            gzip -t smoke.trimmed.R1.fastq.gz
+            gzip -t smoke.trimmed.R2.fastq.gz
+            test -s smoke.fastp.json
+            test -s smoke.fastp.html
+          '
       - name: Smoke-test complete Nextflow graph without real data
         run: |
           docker run --rm bounty1-pace:ci \
