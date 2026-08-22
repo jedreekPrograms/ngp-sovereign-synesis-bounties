@@ -31,65 +31,19 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: HEAD-check all production FASTQ URLs
-        shell: bash
+      - name: Probe all production FASTQ URLs and rank pilot inputs
         run: |
-          python3 - <<'PY'
-          import csv
-          import re
-          import subprocess
-          from concurrent.futures import ThreadPoolExecutor, as_completed
-          from pathlib import Path
-
-          urls = []
-          sheets = (
-              Path('bounty1/resources/samplesheet.csv'),
-              Path('bounty1/resources/chip_inputs.csv'),
-              Path('bounty1/resources/sirt6_cutrun.csv'),
-          )
-          for sheet in sheets:
-              with sheet.open(newline='', encoding='utf-8') as fh:
-                  for row in csv.DictReader(fh):
-                      for key in ('fastq_1', 'fastq_2'):
-                          if row.get(key):
-                              urls.append((row['sample_id'], key, row[key]))
-
-          def probe(item):
-              sample, mate, url = item
-              p = subprocess.run(
-                  ['curl', '--head', '--location', '--silent', '--show-error',
-                   '--max-time', '25', '--retry', '2', url],
-                  text=True, capture_output=True, check=False,
-              )
-              codes = re.findall(r'(?im)^HTTP/\S+\s+(\d{3})', p.stdout)
-              lengths = [int(x) for x in re.findall(r'(?im)^content-length:\s*(\d+)\s*$', p.stdout)]
-              return sample, mate, url, (int(codes[-1]) if codes else None), (lengths[-1] if lengths else None), p.stderr.strip()
-
-          results = []
-          with ThreadPoolExecutor(max_workers=12) as pool:
-              futures = [pool.submit(probe, item) for item in urls]
-              for future in as_completed(futures):
-                  results.append(future.result())
-
-          failures = []
-          known_total = 0
-          known_count = 0
-          for sample, mate, url, status, size, err in sorted(results):
-              if size is not None:
-                  known_total += size
-                  known_count += 1
-              if status is None or not (200 <= status < 400):
-                  failures.append((sample, mate, status, err, url))
-
-          print(f'FASTQ URLs checked: {len(results)}')
-          print(f'HTTP failures: {len(failures)}')
-          print(f'URLs exposing Content-Length: {known_count}/{len(results)}')
-          print(f'Known compressed total: {known_total / 1024**3:.2f} GiB')
-          for failure in failures:
-              print('FAIL:', failure)
-          if failures:
-              raise SystemExit(1)
-          PY
+          python bounty1/bin/probe_data_sizes.py \
+            --sheet bounty1/resources/samplesheet.csv \
+            --sheet bounty1/resources/chip_inputs.csv \
+            --sheet bounty1/resources/sirt6_cutrun.csv \
+            --output bounty1-data-sizes.tsv
+      - name: Upload reproducible data-size inventory
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounty1-data-sizes
+          path: bounty1-data-sizes.tsv
+          if-no-files-found: error
 
   docker-build:
     runs-on: ubuntu-latest
