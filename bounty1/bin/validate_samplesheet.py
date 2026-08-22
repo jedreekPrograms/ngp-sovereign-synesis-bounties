@@ -12,6 +12,22 @@ MD5_RE = re.compile(r'^[0-9a-fA-F]{32}$')
 RUN_RE = re.compile(r'^HRR\d+$')
 EXPERIMENT_RE = re.compile(r'^HRX\d+$')
 SAMPLE_RE = re.compile(r'^HRS\d+$')
+REQUIRED_COLUMNS = {'sample_id','condition','replicate','assay','mark','fastq_1','fastq_2'}
+
+
+def _read_rows(path: Path):
+    with path.open(newline='', encoding='utf-8') as fh:
+        rows = list(csv.DictReader(fh))
+    if not rows:
+        raise ValueError(f'{path} is empty')
+    missing = REQUIRED_COLUMNS - set(rows[0])
+    if missing:
+        raise ValueError(f'{path} missing columns: {sorted(missing)}')
+    ids = [r['sample_id'] for r in rows]
+    dup = [k for k,v in Counter(ids).items() if v > 1]
+    if dup:
+        raise ValueError(f'duplicate sample_id values: {dup}')
+    return rows
 
 
 def _validate_optional_accessions(row):
@@ -41,23 +57,27 @@ def _validate_fastq_url(sample_id, value, expected_suffix):
         raise ValueError(f'{sample_id} FASTQ does not end in .fq.gz/.fastq.gz: {value}')
 
 
+def _validate_integrity_fields(row):
+    _validate_fastq_url(row['sample_id'], row['fastq_1'], 'fastq_1')
+    if row['fastq_2']:
+        _validate_fastq_url(row['sample_id'], row['fastq_2'], 'fastq_2')
+    _validate_optional_accessions(row)
+
+    run = row.get('run_accession', '')
+    if run:
+        expected_prefix = f'https://download.cncb.ac.cn/gsa-human/HRA003336/{run}/'
+        for fastq_field in ('fastq_1', 'fastq_2'):
+            value = row.get(fastq_field, '')
+            if value.startswith('https://download.cncb.ac.cn/') and not value.startswith(expected_prefix):
+                raise ValueError(
+                    f'{row["sample_id"]} {fastq_field} does not match run accession {run}: {value}'
+                )
+    return run
+
+
 def validate(path: Path):
-    with path.open(newline='', encoding='utf-8') as fh:
-        rows = list(csv.DictReader(fh))
-    required = {'sample_id','condition','replicate','assay','mark','fastq_1','fastq_2'}
-    if not rows:
-        raise ValueError('samplesheet is empty')
-    missing = required - set(rows[0])
-    if missing:
-        raise ValueError(f'missing columns: {sorted(missing)}')
-
-    ids = [r['sample_id'] for r in rows]
-    dup = [k for k,v in Counter(ids).items() if v > 1]
-    if dup:
-        raise ValueError(f'duplicate sample_id values: {dup}')
-
+    rows = _read_rows(path)
     matrix = defaultdict(set)
-    input_controls = set()
     runs = []
     for r in rows:
         cond = r['condition']
@@ -78,32 +98,12 @@ def validate(path: Path):
             if r['mark']:
                 raise ValueError(f'WGBS sample {r["sample_id"]} must have an empty mark')
             matrix[(cond, rep)].add('WGBS')
-        elif assay == 'INPUT':
-            if rep != 0:
-                raise ValueError(f'INPUT sample {r["sample_id"]} must use replicate 0')
-            if r['mark']:
-                raise ValueError(f'INPUT sample {r["sample_id"]} must have an empty mark')
-            if cond in input_controls:
-                raise ValueError(f'duplicate INPUT control for {cond}')
-            input_controls.add(cond)
         else:
-            raise ValueError(f'unknown assay {assay}')
+            raise ValueError(f'unknown assay {assay}; primary samplesheet only accepts CHIP/WGBS')
 
-        _validate_fastq_url(r['sample_id'], r['fastq_1'], 'fastq_1')
-        if r['fastq_2']:
-            _validate_fastq_url(r['sample_id'], r['fastq_2'], 'fastq_2')
-        _validate_optional_accessions(r)
-
-        run = r.get('run_accession', '')
+        run = _validate_integrity_fields(r)
         if run:
             runs.append(run)
-            expected_prefix = f'https://download.cncb.ac.cn/gsa-human/HRA003336/{run}/'
-            for fastq_field in ('fastq_1', 'fastq_2'):
-                value = r.get(fastq_field, '')
-                if value.startswith('https://download.cncb.ac.cn/') and not value.startswith(expected_prefix):
-                    raise ValueError(
-                        f'{r["sample_id"]} {fastq_field} does not match run accession {run}: {value}'
-                    )
 
     dup_runs = [k for k,v in Counter(runs).items() if v > 1]
     if dup_runs:
@@ -115,12 +115,47 @@ def validate(path: Path):
     return len(rows), len(paired)
 
 
+def validate_controls(path: Path):
+    rows = _read_rows(path)
+    conditions = set()
+    runs = []
+    for r in rows:
+        cond = r['condition']
+        if cond not in CONDITIONS:
+            raise ValueError(f'unknown INPUT condition {cond}')
+        if r['assay'] != 'INPUT':
+            raise ValueError(f'{r["sample_id"]} must have assay INPUT')
+        if int(r['replicate']) != 0:
+            raise ValueError(f'INPUT sample {r["sample_id"]} must use replicate 0')
+        if r['mark']:
+            raise ValueError(f'INPUT sample {r["sample_id"]} must have an empty mark')
+        if cond in conditions:
+            raise ValueError(f'duplicate INPUT control for {cond}')
+        conditions.add(cond)
+        run = _validate_integrity_fields(r)
+        if run:
+            runs.append(run)
+
+    if conditions != CONDITIONS:
+        missing = sorted(CONDITIONS - conditions)
+        extra = sorted(conditions - CONDITIONS)
+        raise ValueError(f'INPUT control conditions mismatch; missing={missing}, extra={extra}')
+    if len(runs) != len(set(runs)):
+        raise ValueError('duplicate run accession in INPUT controls')
+    return len(rows)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('samplesheet', type=Path)
+    ap.add_argument('--controls-sheet', type=Path)
     args = ap.parse_args()
     n, paired = validate(args.samplesheet)
-    print(f'OK: {n} rows; {paired} fully paired condition/replicate keys')
+    msg = f'OK: {n} primary rows; {paired} fully paired condition/replicate keys'
+    if args.controls_sheet:
+        controls = validate_controls(args.controls_sheet)
+        msg += f'; {controls} per-condition INPUT controls'
+    print(msg)
 
 
 if __name__ == '__main__':
