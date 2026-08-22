@@ -20,7 +20,7 @@ jobs:
           python-version: '3.11'
       - run: pip install pytest scipy
       - run: pytest bounty1/tests -q
-      - run: python bounty1/bin/validate_samplesheet.py bounty1/resources/samplesheet.csv
+      - run: python bounty1/bin/validate_samplesheet.py bounty1/resources/samplesheet.csv --controls-sheet bounty1/resources/chip_inputs.csv
 
   docker-build:
     runs-on: ubuntu-latest
@@ -29,8 +29,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build analysis image
         run: docker build --pull -t bounty1-pace:ci bounty1
-      - name: Validate production samplesheet inside image
-        run: docker run --rm bounty1-pace:ci python bin/validate_samplesheet.py resources/samplesheet.csv
+      - name: Validate production metadata inside image
+        run: docker run --rm bounty1-pace:ci python bin/validate_samplesheet.py resources/samplesheet.csv --controls-sheet resources/chip_inputs.csv
       - name: Verify upstream DunedinPACE model is installed
         run: |
           docker run --rm bounty1-pace:ci R -q -e "library(DunedinPACE); stopifnot(length(mPACE_Models\$model_names) > 0); stopifnot(all(is.finite(unlist(mPACE_Models\$model_intercept)))); print(mPACE_Models\$model_intercept)"
