@@ -1,6 +1,7 @@
 nextflow.enable.dsl=2
 
 params.samplesheet = params.samplesheet ?: 'resources/samplesheet.csv'
+params.controls_sheet = params.controls_sheet ?: 'resources/chip_inputs.csv'
 params.outdir = params.outdir ?: 'results'
 params.mapq = params.mapq ?: 30
 params.peak_qvalue = params.peak_qvalue ?: 0.01
@@ -16,7 +17,11 @@ process FASTP {
     path "${meta.sample_id}.fastp.html", emit: html
     script:
     def ioArgs = reads.size() == 2 ? "-i ${reads[0]} -I ${reads[1]} -o ${meta.sample_id}.trimmed.R1.fastq.gz -O ${meta.sample_id}.trimmed.R2.fastq.gz" : "-i ${reads[0]} -o ${meta.sample_id}.trimmed.R1.fastq.gz"
+    def verifyR1 = meta.read1_md5 ? "echo '${meta.read1_md5}  ${reads[0]}' | md5sum -c -" : ':'
+    def verifyR2 = meta.paired && meta.read2_md5 ? "echo '${meta.read2_md5}  ${reads[1]}' | md5sum -c -" : ':'
     """
+    ${verifyR1}
+    ${verifyR2}
     fastp ${ioArgs} --json ${meta.sample_id}.fastp.json --html ${meta.sample_id}.fastp.html --thread ${task.cpus}
     """
 }
@@ -45,13 +50,16 @@ process CALL_PEAKS {
     publishDir "${params.outdir}/peaks", mode: 'copy'
     input:
     tuple val(meta), path(bam), path(bai)
+    path control_bams
     output:
     tuple val(meta), path("${meta.sample_id}_peaks.narrowPeak"), emit: peaks
     tuple val(meta), path("${meta.sample_id}_treat_pileup.bdg"), emit: pileup
     script:
     def macsFormat = meta.paired ? 'BAMPE' : 'BAM'
+    def control = "${meta.condition}_INPUT.mapq${params.mapq}.bam"
     """
-    macs3 callpeak -t ${bam} -f ${macsFormat} -g hs -n ${meta.sample_id} -q ${params.peak_qvalue} --keep-dup auto -B
+    test -f ${control}
+    macs3 callpeak -t ${bam} -c ${control} -f ${macsFormat} -g hs -n ${meta.sample_id} -q ${params.peak_qvalue} --keep-dup auto -B
     """
 }
 
@@ -167,19 +175,46 @@ process MANIFEST {
 
 workflow {
     samples = Channel.fromPath(params.samplesheet, checkIfExists: true).splitCsv(header: true).map { row ->
-        def meta = [sample_id: row.sample_id, condition: row.condition, replicate: row.replicate as Integer, assay: row.assay, mark: row.mark ?: 'NA', paired: row.fastq_2 ? true : false]
+        def meta = [
+            sample_id: row.sample_id,
+            condition: row.condition,
+            replicate: row.replicate as Integer,
+            assay: row.assay,
+            mark: row.mark ?: 'NA',
+            paired: row.fastq_2 ? true : false,
+            read1_md5: row.read1_md5 ?: '',
+            read2_md5: row.read2_md5 ?: ''
+        ]
         def reads = row.fastq_2 ? [file(row.fastq_1), file(row.fastq_2)] : [file(row.fastq_1)]
         tuple(meta, reads)
     }
 
-    // A DSL2 process can only be invoked once in a workflow. Trim the combined
-    // input channel once, then route the resulting tuples by assay.
-    trimmed = FASTP(samples).trimmed
-    chip_trim = trimmed.filter { meta, reads -> meta.assay == 'CHIP' }
+    controls = Channel.fromPath(params.controls_sheet, checkIfExists: true).splitCsv(header: true).map { row ->
+        def meta = [
+            sample_id: row.sample_id,
+            condition: row.condition,
+            replicate: row.replicate as Integer,
+            assay: row.assay,
+            mark: 'NA',
+            paired: row.fastq_2 ? true : false,
+            read1_md5: row.read1_md5 ?: '',
+            read2_md5: row.read2_md5 ?: ''
+        ]
+        def reads = row.fastq_2 ? [file(row.fastq_1), file(row.fastq_2)] : [file(row.fastq_1)]
+        tuple(meta, reads)
+    }
+
+    all_reads = samples.mix(controls)
+    trimmed = FASTP(all_reads).trimmed
+    chip_and_input_trim = trimmed.filter { meta, reads -> meta.assay == 'CHIP' || meta.assay == 'INPUT' }
     wgbs_trim = trimmed.filter { meta, reads -> meta.assay == 'WGBS' }
 
-    chip_bam = ALIGN_CHIP(chip_trim).bam
-    peaks = CALL_PEAKS(chip_bam).peaks
+    chip_all_bam = ALIGN_CHIP(chip_and_input_trim).bam
+    chip_bam = chip_all_bam.filter { meta, bam, bai -> meta.assay == 'CHIP' }
+    input_bam = chip_all_bam.filter { meta, bam, bai -> meta.assay == 'INPUT' }
+    control_bams = input_bam.map { meta, bam, bai -> bam }.collect()
+
+    peaks = CALL_PEAKS(chip_bam, control_bams).peaks
     wgbs_bam = ALIGN_WGBS(wgbs_trim).bam
     cov = EXTRACT_METHYLATION(wgbs_bam).cov
     pace_result = BUILD_PACE_MATRIX(cov.map { meta, p -> p }.collect())
