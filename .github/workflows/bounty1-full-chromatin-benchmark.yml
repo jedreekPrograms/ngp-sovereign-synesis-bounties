@@ -1,6 +1,11 @@
 name: Bounty 1 full-source chromatin benchmarks
 
 on:
+  push:
+    branches:
+      - bounty-1-real-pipeline
+    paths:
+      - '.github/workflows/bounty1-full-chromatin-benchmark.yml'
   workflow_dispatch:
 
 concurrency:
