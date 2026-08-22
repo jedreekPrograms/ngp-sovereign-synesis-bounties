@@ -95,6 +95,15 @@ jobs:
       - name: Verify upstream DunedinPACE model is installed
         run: |
           docker run --rm bounty1-pace:ci R -q -e "library(DunedinPACE); model_probes <- unique(unlist(getRequiredProbes(FALSE))); background <- unique(unlist(getRequiredProbes(TRUE))); stopifnot(length(mPACE_Models\$model_names) > 0); stopifnot(all(is.finite(unlist(mPACE_Models\$model_intercept)))); stopifnot(all(model_probes %in% background)); print(mPACE_Models\$model_intercept)"
+      - name: Verify streaming WGBS toolchain and export official PACE windows
+        run: |
+          docker run --rm bounty1-pace:ci bash -lc '
+            set -euo pipefail
+            bwameth.py --version
+            micromamba run -n methyldackel MethylDackel --version
+            Rscript /work/bin/export_pace_regions.R --output /tmp/pace.bed --flank 500
+            test "$(wc -l < /tmp/pace.bed)" -gt 1000
+          '
       - name: Execute streaming + MD5 helper on real gzip FASTQ bytes
         run: |
           docker run --rm bounty1-pace:ci bash -lc '
