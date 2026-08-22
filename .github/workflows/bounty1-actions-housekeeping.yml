@@ -29,6 +29,10 @@ jobs:
             json=$(gh api \
               "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?branch=${GITHUB_HEAD_REF}&per_page=50")
 
+            echo "Recent ${workflow} runs:"
+            jq -r '.workflow_runs[:5][] | "  id=\(.id) event=\(.event) status=\(.status) conclusion=\(.conclusion // "-") head=\(.head_sha) created=\(.created_at)"' \
+              <<<"$json"
+
             mapfile -t in_progress < <(
               jq -r '.workflow_runs[] | select(.status == "in_progress") | [.created_at, (.id|tostring)] | @tsv' \
                 <<<"$json" | sort | cut -f2
