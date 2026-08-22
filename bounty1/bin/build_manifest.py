@@ -118,7 +118,7 @@ def main():
     if args.docker_image:
         image = Path(args.docker_image)
         if image.exists() and image.is_file():
-            digest = hashlib.md5()
+            digest = hashlib.md5(usedforsecurity=False)
             with image.open('rb') as handle:
                 for chunk in iter(lambda: handle.read(1024 * 1024), b''):
                     digest.update(chunk)
