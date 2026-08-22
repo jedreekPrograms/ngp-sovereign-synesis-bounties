@@ -10,6 +10,7 @@ import argparse
 import gzip
 import hashlib
 import json
+import urllib.parse
 import urllib.request
 from contextlib import ExitStack
 from pathlib import Path
@@ -37,9 +38,19 @@ def read_record(handle, label):
     return record
 
 
-def open_remote_gzip(url, timeout):
-    request = urllib.request.Request(url, headers={'User-Agent': 'bounty1-real-smoke/1.0'})
-    response = urllib.request.urlopen(request, timeout=timeout)
+def open_gzip_source(url, timeout):
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme == 'https':
+        request = urllib.request.Request(
+            url,
+            headers={'User-Agent': 'bounty1-real-smoke/1.0'},
+        )
+        response = urllib.request.urlopen(request, timeout=timeout)  # nosec B310
+    elif parsed.scheme == 'file':
+        local_path = Path(urllib.request.url2pathname(parsed.path))
+        response = local_path.open('rb')
+    else:
+        raise ValueError(f'unsupported FASTQ URL scheme: {parsed.scheme!r}')
     return response, gzip.GzipFile(fileobj=response, mode='rb')
 
 
@@ -48,10 +59,10 @@ def extract(url1, url2, out1, out2, reads, timeout):
         raise ValueError('--reads must be >= 1')
 
     with ExitStack() as stack:
-        response1, in1 = open_remote_gzip(url1, timeout)
+        response1, in1 = open_gzip_source(url1, timeout)
         stack.callback(response1.close)
         stack.callback(in1.close)
-        response2, in2 = open_remote_gzip(url2, timeout)
+        response2, in2 = open_gzip_source(url2, timeout)
         stack.callback(response2.close)
         stack.callback(in2.close)
 
