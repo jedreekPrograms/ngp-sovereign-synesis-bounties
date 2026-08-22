@@ -12,7 +12,8 @@ opts <- parse_args(OptionParser(option_list=list(
   make_option('--scores', type='character', default='dunedinpace_scores.csv'),
   make_option('--qc', type='character', default='pace_probe_qc.csv'),
   make_option('--model-metadata', type='character', default='pace_model_metadata.csv'),
-  make_option('--min-probe-fraction', type='double', default=0.80)
+  make_option('--min-probe-fraction', type='double', default=0.80),
+  make_option('--min-depth', type='integer', default=6)
 )))
 
 required <- unique(unlist(getRequiredProbes(backgroundList=TRUE), use.names=FALSE))
@@ -48,7 +49,7 @@ for (f in cov_files) {
   x[, pos := as.integer(start)]
   x[, depth := meth + unmeth]
   x[, beta := meth / pmax(depth, 1)]
-  x <- x[depth >= 5, .(chr, pos, beta)]
+  x <- x[depth >= opts$`min-depth`, .(chr, pos, beta)]
   setkey(x, chr, pos)
 
   joined <- x[probe_table, on=.(chr,pos), nomatch=0]
@@ -62,7 +63,8 @@ for (f in cov_files) {
     sample_id=sample_id,
     matched_probes=matched,
     required_probes=length(required),
-    fraction=coverage
+    fraction=coverage,
+    min_cpg_depth=opts$`min-depth`
   )
   if (coverage < opts$`min-probe-fraction`) {
     stop(sprintf('%s probe coverage %.3f below threshold %.3f', sample_id, coverage, opts$`min-probe-fraction`))
@@ -113,7 +115,7 @@ model_meta <- data.table(
   intercept=model_intercept,
   required_background_probes=length(required),
   annotation='IlluminaHumanMethylationEPICanno.ilm10b4.hg19',
-  source_package='danbelsky/DunedinPACE'
+  source_package='danbelsky/DunedinPACE@4b569983543e51d1022aecec9a25e694bb3a336a'
 )
 
 fwrite(out, opts$scores)
