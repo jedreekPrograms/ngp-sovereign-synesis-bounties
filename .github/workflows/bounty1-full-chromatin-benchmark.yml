@@ -12,9 +12,52 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  sirt7-h3k9ac-full-source-chr22:
+  full-source-chr22:
     runs-on: ubuntu-latest
     timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - assay: chip
+            treatment: SIRT7_rep1_H3K9ac
+            treatment_r1: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202646/HRR1202646_f1.fq.gz
+            treatment_r2: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202646/HRR1202646_r2.fq.gz
+            treatment_md5_r1: 11ac424e88bd369983719f3d34319912
+            treatment_md5_r2: f8cf5e697c9f907fd4e3267a72b0899d
+            control: SIRT7_INPUT
+            control_r1: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202672/HRR1202672_f1.fq.gz
+            control_r2: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202672/HRR1202672_r2.fq.gz
+            control_md5_r1: 6e745cdff8332c377be8d171c5d96214
+            control_md5_r2: 754971a8158629aa024b3a1988e2d758
+            qvalue: '0.01'
+          - assay: cutrun
+            treatment: WT_rep2_SIRT6_CUTRUN
+            treatment_r1: https://download.cncb.ac.cn/gsa-human/HRA005392/HRR1354864/HRR1354864_f1.fq.gz
+            treatment_r2: https://download.cncb.ac.cn/gsa-human/HRA005392/HRR1354864/HRR1354864_r2.fq.gz
+            treatment_md5_r1: 26f4d0fb73a0d86c82a0ee74acaa0b21
+            treatment_md5_r2: cc670a79fefc683712a5b7d3862c87cb
+            control: WT_rep2_IgG_CUTRUN
+            control_r1: https://download.cncb.ac.cn/gsa-human/HRA005392/HRR1354852/HRR1354852_f1.fq.gz
+            control_r2: https://download.cncb.ac.cn/gsa-human/HRA005392/HRR1354852/HRR1354852_r2.fq.gz
+            control_md5_r1: 4c66dd78832d5b6332903ef1177546bf
+            control_md5_r2: 529d2736ff07fab07ca950a11c2b8368
+            qvalue: '0.05'
+
+    env:
+      ASSAY: ${{ matrix.assay }}
+      TREATMENT: ${{ matrix.treatment }}
+      TREATMENT_R1: ${{ matrix.treatment_r1 }}
+      TREATMENT_R2: ${{ matrix.treatment_r2 }}
+      TREATMENT_MD5_R1: ${{ matrix.treatment_md5_r1 }}
+      TREATMENT_MD5_R2: ${{ matrix.treatment_md5_r2 }}
+      CONTROL: ${{ matrix.control }}
+      CONTROL_R1: ${{ matrix.control_r1 }}
+      CONTROL_R2: ${{ matrix.control_r2 }}
+      CONTROL_MD5_R1: ${{ matrix.control_md5_r1 }}
+      CONTROL_MD5_R2: ${{ matrix.control_md5_r2 }}
+      QVALUE: ${{ matrix.qvalue }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -40,243 +83,130 @@ jobs:
           gzip -t chromatin-benchmark/ref/chr22.fa.gz
           gzip -d chromatin-benchmark/ref/chr22.fa.gz
           sha256sum chromatin-benchmark/ref/chr22.fa > chromatin-benchmark/qc/chr22.fa.sha256
-          docker run --rm -v "$PWD/chromatin-benchmark:/bench" bounty1-pace:chromatin-benchmark bash -lc '
-            set -euo pipefail
-            bowtie2-build --threads 4 /bench/ref/chr22.fa /bench/ref/chr22 > /bench/qc/bowtie2-build.log 2>&1
-          '
+          docker run --rm \
+            -v "$PWD/chromatin-benchmark:/bench" \
+            bounty1-pace:chromatin-benchmark bash -lc '
+              set -euo pipefail
+              bowtie2-build --threads 4 /bench/ref/chr22.fa /bench/ref/chr22 \
+                > /bench/qc/bowtie2-build.log 2>&1
+            '
 
-      - name: Process complete SIRT7 H3K9ac and INPUT sources
+      - name: Process complete treatment and control FASTQ archives
         run: |
           set -euo pipefail
-          docker run --rm -v "$PWD/chromatin-benchmark:/bench" bounty1-pace:chromatin-benchmark bash -lc '
-            set -euo pipefail
-            cd /bench/work
+          docker run --rm \
+            -e ASSAY -e TREATMENT -e TREATMENT_R1 -e TREATMENT_R2 \
+            -e TREATMENT_MD5_R1 -e TREATMENT_MD5_R2 \
+            -e CONTROL -e CONTROL_R1 -e CONTROL_R2 \
+            -e CONTROL_MD5_R1 -e CONTROL_MD5_R2 -e QVALUE \
+            -v "$PWD/chromatin-benchmark:/bench" \
+            bounty1-pace:chromatin-benchmark bash -lc '
+              set -euo pipefail
+              cd /bench/work
 
-            stream_align_chip() {
-              local sample="$1" r1="$2" r2="$3" md5_1="$4" md5_2="$5"
-              local start end
-              start=$(date +%s)
+              stream_align() {
+                local sample="$1" r1="$2" r2="$3" md5_1="$4" md5_2="$5"
+                local start end
+                start=$(date +%s)
 
-              bash /work/bin/stream_fastp.sh "$sample" "$r1" "$r2" "$md5_1" "$md5_2" 4
+                bash /work/bin/stream_fastp.sh \
+                  "$sample" "$r1" "$r2" "$md5_1" "$md5_2" 4
 
-              bowtie2 --very-sensitive -x /bench/ref/chr22 \
-                -1 "${sample}.trimmed.R1.fastq.gz" \
-                -2 "${sample}.trimmed.R2.fastq.gz" -p 4 \
-                2> "/bench/qc/${sample}.bowtie2.log" | \
-                samtools view -b - | samtools sort -n -@ 4 -o "${sample}.name.bam"
+                if [[ "$ASSAY" == "cutrun" ]]; then
+                  bowtie2 --very-sensitive --no-mixed --no-discordant --dovetail \
+                    -x /bench/ref/chr22 \
+                    -1 "${sample}.trimmed.R1.fastq.gz" \
+                    -2 "${sample}.trimmed.R2.fastq.gz" -p 4 \
+                    2> "/bench/qc/${sample}.bowtie2.log" | \
+                    samtools view -b - | samtools sort -n -@ 4 -m 384M -o "${sample}.name.bam"
+                else
+                  bowtie2 --very-sensitive \
+                    -x /bench/ref/chr22 \
+                    -1 "${sample}.trimmed.R1.fastq.gz" \
+                    -2 "${sample}.trimmed.R2.fastq.gz" -p 4 \
+                    2> "/bench/qc/${sample}.bowtie2.log" | \
+                    samtools view -b - | samtools sort -n -@ 4 -m 384M -o "${sample}.name.bam"
+                fi
 
-              samtools fixmate -m "${sample}.name.bam" "${sample}.fixmate.bam"
-              rm -f "${sample}.name.bam"
-              samtools sort -@ 4 -m 384M -o "${sample}.position.bam" "${sample}.fixmate.bam"
-              rm -f "${sample}.fixmate.bam"
-              samtools markdup -r -@ 4 "${sample}.position.bam" "${sample}.dedup.bam"
-              rm -f "${sample}.position.bam"
-              samtools view -b -q 30 "${sample}.dedup.bam" | \
-                samtools sort -@ 4 -m 384M -o "${sample}.mapq30.bam"
-              rm -f "${sample}.dedup.bam" \
-                    "${sample}.trimmed.R1.fastq.gz" "${sample}.trimmed.R2.fastq.gz"
+                samtools fixmate -m "${sample}.name.bam" "${sample}.fixmate.bam"
+                rm -f "${sample}.name.bam"
+                samtools sort -@ 4 -m 384M -o "${sample}.position.bam" "${sample}.fixmate.bam"
+                rm -f "${sample}.fixmate.bam"
+                samtools markdup -r -@ 4 "${sample}.position.bam" "${sample}.dedup.bam"
+                rm -f "${sample}.position.bam"
+                samtools view -b -q 30 "${sample}.dedup.bam" | \
+                  samtools sort -@ 4 -m 384M -o "${sample}.mapq30.bam"
+                rm -f "${sample}.dedup.bam" \
+                      "${sample}.trimmed.R1.fastq.gz" "${sample}.trimmed.R2.fastq.gz"
 
-              samtools index "${sample}.mapq30.bam"
-              samtools flagstat "${sample}.mapq30.bam" > "/bench/qc/${sample}.flagstat.txt"
-              test "$(samtools view -c "${sample}.mapq30.bam")" -gt 0
-              mv "${sample}.fastp.json" "/bench/qc/${sample}.fastp.json"
-              mv "${sample}.fastp.html" "/bench/qc/${sample}.fastp.html"
+                samtools index "${sample}.mapq30.bam"
+                samtools flagstat "${sample}.mapq30.bam" > "/bench/qc/${sample}.flagstat.txt"
+                test "$(samtools view -c "${sample}.mapq30.bam")" -gt 0
+                mv "${sample}.fastp.json" "/bench/qc/${sample}.fastp.json"
+                mv "${sample}.fastp.html" "/bench/qc/${sample}.fastp.html"
 
-              end=$(date +%s)
-              echo $((end-start)) > "/bench/qc/${sample}.wall-seconds.txt"
-              df -h > "/bench/qc/${sample}.disk-after.txt"
-            }
+                end=$(date +%s)
+                echo $((end-start)) > "/bench/qc/${sample}.wall-seconds.txt"
+                df -h > "/bench/qc/${sample}.disk-after.txt"
+              }
 
-            stream_align_chip \
-              SIRT7_rep1_H3K9ac \
-              https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202646/HRR1202646_f1.fq.gz \
-              https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202646/HRR1202646_r2.fq.gz \
-              5ba6b90380126a0af8fd7ea4223d0f4f \
-              a9d3f57ced18801e9d4a6d7e1c92b0e8
+              stream_align \
+                "$TREATMENT" "$TREATMENT_R1" "$TREATMENT_R2" \
+                "$TREATMENT_MD5_R1" "$TREATMENT_MD5_R2"
+              stream_align \
+                "$CONTROL" "$CONTROL_R1" "$CONTROL_R2" \
+                "$CONTROL_MD5_R1" "$CONTROL_MD5_R2"
 
-            stream_align_chip \
-              SIRT7_INPUT \
-              https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202672/HRR1202672_f1.fq.gz \
-              https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202672/HRR1202672_r2.fq.gz \
-              e3e27c8df9d69e4ca1aad352aad3fe04 \
-              2519c4d6771c4a3384ff5d0949c14598
+              if [[ "$ASSAY" == "cutrun" ]]; then
+                macs3 callpeak \
+                  -t "${TREATMENT}.mapq30.bam" -c "${CONTROL}.mapq30.bam" \
+                  -f BAMPE -g hs -n "${TREATMENT}_chr22_full" \
+                  -q "$QVALUE" --keep-dup all --call-summits \
+                  > "/bench/qc/${TREATMENT}.macs3.stdout.log" \
+                  2> "/bench/qc/${TREATMENT}.macs3.stderr.log"
+              else
+                macs3 callpeak \
+                  -t "${TREATMENT}.mapq30.bam" -c "${CONTROL}.mapq30.bam" \
+                  -f BAMPE -g hs -n "${TREATMENT}_chr22_full" \
+                  -q "$QVALUE" --keep-dup all -B \
+                  > "/bench/qc/${TREATMENT}.macs3.stdout.log" \
+                  2> "/bench/qc/${TREATMENT}.macs3.stderr.log"
+              fi
 
-            macs3 callpeak \
-              -t SIRT7_rep1_H3K9ac.mapq30.bam \
-              -c SIRT7_INPUT.mapq30.bam \
-              -f BAMPE -g hs -n SIRT7_rep1_H3K9ac_chr22_full \
-              -q 0.01 --keep-dup all -B \
-              > /bench/qc/SIRT7_rep1_H3K9ac.macs3.stdout.log \
-              2> /bench/qc/SIRT7_rep1_H3K9ac.macs3.stderr.log
+              test -f "${TREATMENT}_chr22_full_peaks.narrowPeak"
+              cp "${TREATMENT}_chr22_full_peaks.narrowPeak" /bench/qc/
+              wc -l "${TREATMENT}_chr22_full_peaks.narrowPeak" \
+                > "/bench/qc/${TREATMENT}.peak-count.txt"
+            '
 
-            test -s SIRT7_rep1_H3K9ac_chr22_full_peaks.narrowPeak
-            cp SIRT7_rep1_H3K9ac_chr22_full_peaks.narrowPeak /bench/qc/
-            wc -l SIRT7_rep1_H3K9ac_chr22_full_peaks.narrowPeak > /bench/qc/SIRT7_rep1_H3K9ac.peak-count.txt
-          '
-
-      - name: Record ChIP benchmark scope
+      - name: Record benchmark scope
         if: always()
         run: |
           set +e
           mkdir -p chromatin-benchmark/qc
           df -h > chromatin-benchmark/qc/final-disk.txt
           du -sh chromatin-benchmark > chromatin-benchmark/qc/final-working-set.txt 2>/dev/null || true
-          cat > chromatin-benchmark/qc/README.txt <<'EOF'
-          FULL-SOURCE ChIP TECHNICAL BENCHMARK
-          ====================================
-          Treatment: HRA003336 / HRR1202646 / SIRT7_rep1_H3K9ac.
-          Control:   HRA003336 / HRR1202672 / SIRT7_INPUT.
+          cat > chromatin-benchmark/qc/README.txt <<EOF
+          FULL-SOURCE ${ASSAY^^} TECHNICAL BENCHMARK
+          ==========================================
+          Treatment: ${TREATMENT}
+          Control:   ${CONTROL}
           Input scope: both complete paired FASTQ archives for treatment and control.
-          Integrity: stream_fastp.sh validates published MD5 values on exact compressed bytes.
+          Integrity: stream_fastp.sh validates the manifest-published MD5 values on the
+          exact compressed source bytes before the sample can pass.
           Processing: complete FASTQ -> fastp -> Bowtie2 -> fixmate -> coordinate sort ->
-          duplicate removal -> MAPQ >= 30 -> MACS3 q <= 0.01.
+          duplicate removal -> MAPQ >= 30 -> MACS3 q <= ${QVALUE}.
           Reference for this resource-bounded technical benchmark: UCSC hg19 chr22 only.
 
-          This validates complete-source I/O and the chromatin processing path without staging
-          the entire cohort. It is NOT final biological bounty evidence and must not be reported
-          as a whole-genome occupancy result.
+          This is scalability and complete-source evidence, not final biological bounty
+          evidence and not a whole-genome occupancy result.
           EOF
 
-      - name: Upload ChIP benchmark evidence
+      - name: Upload benchmark evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bounty1-full-source-chip-chr22
-          path: chromatin-benchmark/qc
-          if-no-files-found: warn
-          retention-days: 14
-
-  sirt6-cutrun-full-source-chr22:
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Load pinned analysis image from shared cache
-        uses: docker/build-push-action@v6
-        with:
-          context: bounty1
-          load: true
-          pull: true
-          tags: bounty1-pace:chromatin-benchmark
-          cache-from: type=gha,scope=bounty1-docker
-          cache-to: type=gha,mode=max,scope=bounty1-docker
-
-      - name: Prepare hg19 chr22 alignment reference
-        run: |
-          set -euo pipefail
-          mkdir -p chromatin-benchmark/ref chromatin-benchmark/work chromatin-benchmark/qc
-          curl -fsSL --retry 5 --retry-delay 5 \
-            -o chromatin-benchmark/ref/chr22.fa.gz \
-            https://hgdownload.soe.ucsc.edu/goldenPath/hg19/chromosomes/chr22.fa.gz
-          gzip -t chromatin-benchmark/ref/chr22.fa.gz
-          gzip -d chromatin-benchmark/ref/chr22.fa.gz
-          sha256sum chromatin-benchmark/ref/chr22.fa > chromatin-benchmark/qc/chr22.fa.sha256
-          docker run --rm -v "$PWD/chromatin-benchmark:/bench" bounty1-pace:chromatin-benchmark bash -lc '
-            set -euo pipefail
-            bowtie2-build --threads 4 /bench/ref/chr22.fa /bench/ref/chr22 > /bench/qc/bowtie2-build.log 2>&1
-          '
-
-      - name: Process complete WT SIRT6 CUT&RUN and IgG sources
-        run: |
-          set -euo pipefail
-          docker run --rm -v "$PWD/chromatin-benchmark:/bench" bounty1-pace:chromatin-benchmark bash -lc '
-            set -euo pipefail
-            cd /bench/work
-
-            stream_align_cutrun() {
-              local sample="$1" r1="$2" r2="$3" md5_1="$4" md5_2="$5"
-              local start end
-              start=$(date +%s)
-
-              bash /work/bin/stream_fastp.sh "$sample" "$r1" "$r2" "$md5_1" "$md5_2" 4
-
-              bowtie2 --very-sensitive --no-mixed --no-discordant --dovetail \
-                -x /bench/ref/chr22 \
-                -1 "${sample}.trimmed.R1.fastq.gz" \
-                -2 "${sample}.trimmed.R2.fastq.gz" -p 4 \
-                2> "/bench/qc/${sample}.bowtie2.log" | \
-                samtools view -b - | samtools sort -n -@ 4 -o "${sample}.name.bam"
-
-              samtools fixmate -m "${sample}.name.bam" "${sample}.fixmate.bam"
-              rm -f "${sample}.name.bam"
-              samtools sort -@ 4 -m 384M -o "${sample}.position.bam" "${sample}.fixmate.bam"
-              rm -f "${sample}.fixmate.bam"
-              samtools markdup -r -@ 4 "${sample}.position.bam" "${sample}.dedup.bam"
-              rm -f "${sample}.position.bam"
-              samtools view -b -q 30 "${sample}.dedup.bam" | \
-                samtools sort -@ 4 -m 384M -o "${sample}.mapq30.bam"
-              rm -f "${sample}.dedup.bam" \
-                    "${sample}.trimmed.R1.fastq.gz" "${sample}.trimmed.R2.fastq.gz"
-
-              samtools index "${sample}.mapq30.bam"
-              samtools flagstat "${sample}.mapq30.bam" > "/bench/qc/${sample}.flagstat.txt"
-              test "$(samtools view -c "${sample}.mapq30.bam")" -gt 0
-              mv "${sample}.fastp.json" "/bench/qc/${sample}.fastp.json"
-              mv "${sample}.fastp.html" "/bench/qc/${sample}.fastp.html"
-
-              end=$(date +%s)
-              echo $((end-start)) > "/bench/qc/${sample}.wall-seconds.txt"
-              df -h > "/bench/qc/${sample}.disk-after.txt"
-            }
-
-            stream_align_cutrun \
-              WT_rep2_SIRT6_CUTRUN \
-              https://download.cncb.ac.cn/gsa-human/HRA005392/HRR1354864/HRR1354864_f1.fq.gz \
-              https://download.cncb.ac.cn/gsa-human/HRA005392/HRR1354864/HRR1354864_r2.fq.gz \
-              bfe73b8550583f5effee41389747defa \
-              e396c75239ebf1fbc9e88676093a30f7
-
-            stream_align_cutrun \
-              WT_rep2_IgG_CUTRUN \
-              https://download.cncb.ac.cn/gsa-human/HRA005392/HRR1354852/HRR1354852_f1.fq.gz \
-              https://download.cncb.ac.cn/gsa-human/HRA005392/HRR1354852/HRR1354852_r2.fq.gz \
-              9d3428de9f39ce249318a489490d1054 \
-              b5580162457c52bf8a1d640630641567
-
-            macs3 callpeak \
-              -t WT_rep2_SIRT6_CUTRUN.mapq30.bam \
-              -c WT_rep2_IgG_CUTRUN.mapq30.bam \
-              -f BAMPE -g hs -n WT_rep2_SIRT6_CUTRUN_chr22_full \
-              -q 0.05 --keep-dup all --call-summits \
-              > /bench/qc/WT_rep2_SIRT6_CUTRUN.macs3.stdout.log \
-              2> /bench/qc/WT_rep2_SIRT6_CUTRUN.macs3.stderr.log
-
-            test -s WT_rep2_SIRT6_CUTRUN_chr22_full_peaks.narrowPeak
-            cp WT_rep2_SIRT6_CUTRUN_chr22_full_peaks.narrowPeak /bench/qc/
-            wc -l WT_rep2_SIRT6_CUTRUN_chr22_full_peaks.narrowPeak > /bench/qc/WT_rep2_SIRT6_CUTRUN.peak-count.txt
-          '
-
-      - name: Record CUT&RUN benchmark scope
-        if: always()
-        run: |
-          set +e
-          mkdir -p chromatin-benchmark/qc
-          df -h > chromatin-benchmark/qc/final-disk.txt
-          du -sh chromatin-benchmark > chromatin-benchmark/qc/final-working-set.txt 2>/dev/null || true
-          cat > chromatin-benchmark/qc/README.txt <<'EOF'
-          FULL-SOURCE CUT&RUN TECHNICAL BENCHMARK
-          =======================================
-          Treatment: HRA005392 / HRR1354864 / WT_rep2_SIRT6_CUTRUN.
-          Control:   HRA005392 / HRR1354852 / WT_rep2_IgG_CUTRUN.
-          Input scope: both complete paired FASTQ archives for treatment and control.
-          Integrity: stream_fastp.sh validates published MD5 values on exact compressed bytes.
-          Processing: complete FASTQ -> fastp -> Bowtie2 CUT&RUN mode -> fixmate ->
-          coordinate sort -> duplicate removal -> MAPQ >= 30 -> MACS3 q <= 0.05.
-          Reference for this resource-bounded technical benchmark: UCSC hg19 chr22 only.
-
-          This validates complete-source I/O and the independent SIRT6-locus data path without
-          staging the complete cohort. It is NOT final biological bounty evidence and must not
-          be reported as a whole-genome SIRT6-locus result.
-          EOF
-
-      - name: Upload CUT&RUN benchmark evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: bounty1-full-source-cutrun-chr22
+          name: bounty1-full-source-${{ matrix.assay }}-chr22
           path: chromatin-benchmark/qc
           if-no-files-found: warn
           retention-days: 14
