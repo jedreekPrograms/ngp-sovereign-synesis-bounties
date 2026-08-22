@@ -159,10 +159,13 @@ workflow {
         def reads = row.fastq_2 ? [file(row.fastq_1), file(row.fastq_2)] : [file(row.fastq_1)]
         tuple(meta, reads)
     }
-    chip_reads = samples.filter { meta, reads -> meta.assay == 'CHIP' }
-    wgbs_reads = samples.filter { meta, reads -> meta.assay == 'WGBS' }
-    chip_trim = FASTP(chip_reads).trimmed
-    wgbs_trim = FASTP(wgbs_reads).trimmed
+
+    // A DSL2 process can only be invoked once in a workflow. Trim the combined
+    // input channel once, then route the resulting tuples by assay.
+    trimmed = FASTP(samples).trimmed
+    chip_trim = trimmed.filter { meta, reads -> meta.assay == 'CHIP' }
+    wgbs_trim = trimmed.filter { meta, reads -> meta.assay == 'WGBS' }
+
     chip_bam = ALIGN_CHIP(chip_trim).bam
     peaks = CALL_PEAKS(chip_bam).peaks
     wgbs_bam = ALIGN_WGBS(wgbs_trim).bam
