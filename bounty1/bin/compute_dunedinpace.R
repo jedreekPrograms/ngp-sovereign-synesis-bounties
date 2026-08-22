@@ -11,6 +11,7 @@ opts <- parse_args(OptionParser(option_list=list(
   make_option('--cov-dir', type='character', default='.'),
   make_option('--scores', type='character', default='dunedinpace_scores.csv'),
   make_option('--qc', type='character', default='pace_probe_qc.csv'),
+  make_option('--model-metadata', type='character', default='pace_model_metadata.csv'),
   make_option('--min-probe-fraction', type='double', default=0.80)
 )))
 
@@ -69,16 +70,23 @@ for (f in cov_files) {
 }
 
 projected <- PACEProjector(beta, proportionOfProbesRequired=opts$`min-probe-fraction`)
-if (is.list(projected)) {
-  if (length(projected) == 0) stop('PACEProjector returned no models')
-  model_names <- names(projected)
-  preferred <- which(grepl('Age45|PACE', model_names, ignore.case=TRUE))
-  idx <- if (length(preferred) > 0) preferred[1] else 1
-  scores <- projected[[idx]]
-  model_name <- if (!is.null(model_names) && nzchar(model_names[idx])) model_names[idx] else paste0('model_', idx)
-} else {
-  scores <- projected
-  model_name <- 'PACEProjector'
+if (!is.list(projected) || length(projected) == 0) {
+  stop('PACEProjector did not return its expected named model list')
+}
+
+model_names <- names(projected)
+preferred <- which(grepl('Age45|PACE', model_names, ignore.case=TRUE))
+idx <- if (length(preferred) > 0) preferred[1] else 1
+model_name <- model_names[idx]
+if (is.null(model_name) || !nzchar(model_name)) stop('Selected DunedinPACE model has no name')
+scores <- projected[[idx]]
+
+if (is.null(mPACE_Models$model_intercept[[model_name]])) {
+  stop(sprintf('No model intercept found for %s', model_name))
+}
+model_intercept <- as.numeric(mPACE_Models$model_intercept[[model_name]])
+if (length(model_intercept) != 1 || !is.finite(model_intercept)) {
+  stop(sprintf('Invalid model intercept for %s', model_name))
 }
 
 parse_meta <- function(id) {
@@ -100,5 +108,14 @@ out <- data.table(
 )
 if (any(!is.finite(out$dunedinpace))) stop('PACEProjector returned non-finite scores')
 
+model_meta <- data.table(
+  model=model_name,
+  intercept=model_intercept,
+  required_background_probes=length(required),
+  annotation='IlluminaHumanMethylationEPICanno.ilm10b4.hg19',
+  source_package='danbelsky/DunedinPACE'
+)
+
 fwrite(out, opts$scores)
 fwrite(rbindlist(qc), opts$qc)
+fwrite(model_meta, opts$`model-metadata`)
