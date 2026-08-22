@@ -1,3 +1,4 @@
+import csv
 import json
 import subprocess
 import sys
@@ -29,27 +30,47 @@ def test_compute_pairs_by_condition_and_replicate():
     assert out['H3K9ac_vs_DunedinPACE']['pearson_r'] > 0.99
 
 
-def test_manifest_marks_data_as_non_synthetic(tmp_path):
+def test_manifest_uses_model_metadata_and_marks_data_as_non_synthetic(tmp_path):
     c = tmp_path/'c.json'
     c.write_text(json.dumps({
         'n_paired': 4,
         'H3K9ac_vs_DunedinPACE': {'pearson_r': 0.95, 'p_value': 0.005},
         'H3K56ac_vs_DunedinPACE': {'pearson_r': 0.96, 'p_value': 0.004}
     }))
+    model = tmp_path/'model.csv'
+    with model.open('w', newline='', encoding='utf-8') as fh:
+        w = csv.DictWriter(
+            fh,
+            fieldnames=['model','intercept','required_background_probes','annotation','source_package'],
+        )
+        w.writeheader()
+        w.writerow({
+            'model': 'Age45',
+            'intercept': '51.024577',
+            'required_background_probes': '20000',
+            'annotation': 'IlluminaHumanMethylationEPICanno.ilm10b4.hg19',
+            'source_package': 'danbelsky/DunedinPACE',
+        })
     o = tmp_path/'manifest.json'
     subprocess.check_call([
         sys.executable, str(ROOT/'bin/build_manifest.py'),
-        '--correlations', str(c), '--mapq','30','--peak-fdr','0.01','--output',str(o)
+        '--correlations', str(c), '--model-metadata', str(model),
+        '--mapq','30','--peak-fdr','0.01','--output',str(o)
     ])
     m = json.loads(o.read_text())
     assert m['alignment']['mapq_threshold'] == 30
+    assert m['alignment']['reference_genome'] == 'hg19'
     assert m['peak_calling']['fdr'] < 0.05
+    assert m['dunedinpace']['intercept'] == 51.024577
+    assert m['dunedinpace']['model'] == 'Age45'
+    assert m['provenance']['dunedinpace_intercept_read_from_upstream_model'] is True
     assert m['provenance']['synthetic_values_used'] is False
     assert m['data_deposit_doi'] == ''
 
 
-def test_r_pipeline_uses_upstream_api_and_background_probes():
+def test_r_pipeline_uses_upstream_api_background_probes_and_model_intercept():
     text = (ROOT/'bin/compute_dunedinpace.R').read_text()
     assert 'PACEProjector(' in text
     assert 'getRequiredProbes(backgroundList=TRUE)' in text
+    assert 'mPACE_Models$model_intercept[[model_name]]' in text
     assert 'DunedinPACE.getRequiredProbes' not in text
