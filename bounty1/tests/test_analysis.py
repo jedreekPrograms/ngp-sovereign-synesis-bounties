@@ -64,8 +64,8 @@ def test_manifest_uses_model_metadata_and_marks_data_as_non_synthetic(tmp_path):
         )
         w.writeheader()
         w.writerow({
-            'model': 'Age45',
-            'intercept': '51.024577',
+            'model': 'fixture-model',
+            'intercept': '-1.2345',
             'required_background_probes': '20000',
             'annotation': 'IlluminaHumanMethylationEPICanno.ilm10b4.hg19',
             'source_package': 'danbelsky/DunedinPACE',
@@ -80,8 +80,8 @@ def test_manifest_uses_model_metadata_and_marks_data_as_non_synthetic(tmp_path):
     assert m['alignment']['mapq_threshold'] == 30
     assert m['alignment']['reference_genome'] == 'hg19'
     assert m['peak_calling']['fdr'] < 0.05
-    assert m['dunedinpace']['intercept'] == 51.024577
-    assert m['dunedinpace']['model'] == 'Age45'
+    assert m['dunedinpace']['intercept'] == -1.2345
+    assert m['dunedinpace']['model'] == 'fixture-model'
     assert m['data_source']['primary_study'] == 'HRA003336'
     assert m['data_source']['sirt6_cutrun_study'] == 'HRA005392'
     assert m['locus_definition']['independent_of_histone_marks'] is True
@@ -98,3 +98,13 @@ def test_r_pipeline_uses_upstream_api_background_probes_and_model_intercept():
     assert 'getRequiredProbes(backgroundList=TRUE)' in text
     assert 'mPACE_Models$model_intercept[[model_name]]' in text
     assert 'DunedinPACE.getRequiredProbes' not in text
+
+
+def test_paired_wgbs_stays_name_sorted_for_methylation_extraction():
+    text = (ROOT/'main.nf').read_text()
+    wgbs = text.split('process ALIGN_WGBS {', 1)[1].split('process EXTRACT_METHYLATION {', 1)[0]
+    assert 'samtools sort -n' in wgbs
+    assert 'deduplicated.name.bam' in wgbs
+    assert 'samtools index' not in wgbs
+    extractor = text.split('process EXTRACT_METHYLATION {', 1)[1].split('process BUILD_PACE_MATRIX {', 1)[0]
+    assert '--paired-end' in extractor
