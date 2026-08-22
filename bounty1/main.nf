@@ -6,6 +6,7 @@ params.cutrun_sheet = params.cutrun_sheet ?: 'resources/sirt6_cutrun.csv'
 params.outdir = params.outdir ?: 'results'
 params.mapq = params.mapq ?: 30
 params.peak_qvalue = params.peak_qvalue ?: 0.01
+params.cutrun_qvalue = params.cutrun_qvalue ?: 0.05
 params.min_cpg_depth = params.min_cpg_depth ?: 6
 params.sirt6_min_reciprocal_overlap = params.sirt6_min_reciprocal_overlap ?: 0.50
 
@@ -111,9 +112,14 @@ process ALIGN_CUTRUN {
     set -euo pipefail
     bowtie2 --very-sensitive --no-mixed --no-discordant --dovetail \
       -x ${params.bowtie2_index} ${readArgs} -p ${task.cpus} 2> ${meta.sample_id}.bowtie2.log | \
-      samtools view -b -q ${params.mapq} - | \
+      samtools view -b - | samtools sort -n -@ ${task.cpus} -o ${meta.sample_id}.name.bam
+    samtools fixmate -m ${meta.sample_id}.name.bam ${meta.sample_id}.fixmate.bam
+    samtools sort -@ ${task.cpus} -o ${meta.sample_id}.position.bam ${meta.sample_id}.fixmate.bam
+    samtools markdup -r -@ ${task.cpus} ${meta.sample_id}.position.bam ${meta.sample_id}.dedup.bam
+    samtools view -b -q ${params.mapq} ${meta.sample_id}.dedup.bam | \
       samtools sort -@ ${task.cpus} -o ${meta.sample_id}.mapq${params.mapq}.bam
     samtools index ${meta.sample_id}.mapq${params.mapq}.bam
+    rm -f ${meta.sample_id}.name.bam ${meta.sample_id}.fixmate.bam ${meta.sample_id}.position.bam ${meta.sample_id}.dedup.bam
     """
     stub:
     """
@@ -135,7 +141,7 @@ process CALL_CUTRUN_PEAKS {
     """
     test -f ${control}
     macs3 callpeak -t ${bam} -c ${control} -f BAMPE -g hs \
-      -n ${meta.sample_id} -q ${params.peak_qvalue} --keep-dup all --call-summits
+      -n ${meta.sample_id} -q ${params.cutrun_qvalue} --keep-dup all --call-summits
     """
     stub:
     """
@@ -174,6 +180,7 @@ process ALIGN_WGBS {
     script:
     def readArgs = reads.size() == 2 ? "-1 ${reads[0]} -2 ${reads[1]}" : "${reads[0]}"
     """
+    set -euo pipefail
     mkdir -p bismark_${meta.sample_id}
     bismark --genome ${params.bismark_index} --bowtie2 --parallel 2 --output_dir bismark_${meta.sample_id} ${readArgs}
     BAM=\$(find bismark_${meta.sample_id} -name '*_bismark_bt2*.bam' | head -n1)
@@ -202,6 +209,7 @@ process EXTRACT_METHYLATION {
     script:
     def pairedArg = meta.paired ? '--paired-end' : ''
     """
+    set -euo pipefail
     bismark_methylation_extractor ${pairedArg} --comprehensive --gzip --bedGraph ${bam}
     COV=\$(find . -name '*.bismark.cov.gz' | head -n1)
     test -n "\${COV}"
