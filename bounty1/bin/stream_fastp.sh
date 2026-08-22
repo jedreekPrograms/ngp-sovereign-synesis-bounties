@@ -47,13 +47,15 @@ verify_md5() {
 }
 
 cleanup() {
-  rm -f r1.fastp.fifo r1.md5.fifo r2.fastp.fifo r2.md5.fifo
+  rm -f r1.fastp.fq.gz r1.md5.fifo r2.fastp.fq.gz r2.md5.fifo
 }
 trap cleanup EXIT
 
-mkfifo r1.fastp.fifo r1.md5.fifo
+# fastp uses the input filename suffix to select gzip input handling, therefore
+# the data FIFOs deliberately end in .fq.gz.
+mkfifo r1.fastp.fq.gz r1.md5.fifo
 (
-  stream_source "$r1_source" | tee r1.md5.fifo > r1.fastp.fifo
+  stream_source "$r1_source" | tee r1.md5.fifo > r1.fastp.fq.gz
 ) &
 r1_stream_pid=$!
 (
@@ -62,9 +64,9 @@ r1_stream_pid=$!
 r1_md5_pid=$!
 
 if [[ -n "$r2_source" ]]; then
-  mkfifo r2.fastp.fifo r2.md5.fifo
+  mkfifo r2.fastp.fq.gz r2.md5.fifo
   (
-    stream_source "$r2_source" | tee r2.md5.fifo > r2.fastp.fifo
+    stream_source "$r2_source" | tee r2.md5.fifo > r2.fastp.fq.gz
   ) &
   r2_stream_pid=$!
   (
@@ -73,8 +75,8 @@ if [[ -n "$r2_source" ]]; then
   r2_md5_pid=$!
 
   fastp \
-    -i r1.fastp.fifo \
-    -I r2.fastp.fifo \
+    -i r1.fastp.fq.gz \
+    -I r2.fastp.fq.gz \
     -o "${sample_id}.trimmed.R1.fastq.gz" \
     -O "${sample_id}.trimmed.R2.fastq.gz" \
     --json "${sample_id}.fastp.json" \
@@ -85,7 +87,7 @@ if [[ -n "$r2_source" ]]; then
   verify_md5 "$r2_expected" r2.actual.md5 "${sample_id} R2"
 else
   fastp \
-    -i r1.fastp.fifo \
+    -i r1.fastp.fq.gz \
     -o "${sample_id}.trimmed.R1.fastq.gz" \
     --json "${sample_id}.fastp.json" \
     --html "${sample_id}.fastp.html" \
