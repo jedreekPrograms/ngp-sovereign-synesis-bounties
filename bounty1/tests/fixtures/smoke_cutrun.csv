@@ -1,0 +1,9 @@
+sample_id,condition,replicate,assay,target,control,fastq_1,fastq_2
+WT_rep1_IgG_CUTRUN,WT,1,CUTRUN,IgG,true,tests/fixtures/stub_R1.fastq.gz,tests/fixtures/stub_R2.fastq.gz
+WT_rep2_IgG_CUTRUN,WT,2,CUTRUN,IgG,true,tests/fixtures/stub_R1.fastq.gz,tests/fixtures/stub_R2.fastq.gz
+SIRT6_KO_rep1_IgG_CUTRUN,SIRT6_KO,1,CUTRUN,IgG,true,tests/fixtures/stub_R1.fastq.gz,tests/fixtures/stub_R2.fastq.gz
+SIRT6_KO_rep2_IgG_CUTRUN,SIRT6_KO,2,CUTRUN,IgG,true,tests/fixtures/stub_R1.fastq.gz,tests/fixtures/stub_R2.fastq.gz
+WT_rep1_SIRT6_CUTRUN,WT,1,CUTRUN,SIRT6,false,tests/fixtures/stub_R1.fastq.gz,tests/fixtures/stub_R2.fastq.gz
+WT_rep2_SIRT6_CUTRUN,WT,2,CUTRUN,SIRT6,false,tests/fixtures/stub_R1.fastq.gz,tests/fixtures/stub_R2.fastq.gz
+SIRT6_KO_rep1_SIRT6_CUTRUN,SIRT6_KO,1,CUTRUN,SIRT6,false,tests/fixtures/stub_R1.fastq.gz,tests/fixtures/stub_R2.fastq.gz
+SIRT6_KO_rep2_SIRT6_CUTRUN,SIRT6_KO,2,CUTRUN,SIRT6,false,tests/fixtures/stub_R1.fastq.gz,tests/fixtures/stub_R2.fastq.gz
