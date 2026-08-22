@@ -9,21 +9,26 @@ params.min_cpg_depth = params.min_cpg_depth ?: 6
 
 process FASTP {
     tag "${meta.sample_id}"
-    publishDir "${params.outdir}/qc/fastp", mode: 'copy'
+    label 'stream_io'
+    publishDir "${params.outdir}/qc/fastp", mode: 'copy', saveAs: { name ->
+        (name.endsWith('.json') || name.endsWith('.html')) ? name : null
+    }
     input:
-    tuple val(meta), path(reads)
+    tuple val(meta), val(reads)
     output:
     tuple val(meta), path("${meta.sample_id}.trimmed*.fastq.gz"), emit: trimmed
     path "${meta.sample_id}.fastp.json", emit: json
     path "${meta.sample_id}.fastp.html", emit: html
     script:
-    def ioArgs = reads.size() == 2 ? "-i ${reads[0]} -I ${reads[1]} -o ${meta.sample_id}.trimmed.R1.fastq.gz -O ${meta.sample_id}.trimmed.R2.fastq.gz" : "-i ${reads[0]} -o ${meta.sample_id}.trimmed.R1.fastq.gz"
-    def verifyR1 = meta.read1_md5 ? "echo '${meta.read1_md5}  ${reads[0]}' | md5sum -c -" : ':'
-    def verifyR2 = meta.paired && meta.read2_md5 ? "echo '${meta.read2_md5}  ${reads[1]}' | md5sum -c -" : ':'
+    def r2 = reads.size() == 2 ? reads[1] : ''
     """
-    ${verifyR1}
-    ${verifyR2}
-    fastp ${ioArgs} --json ${meta.sample_id}.fastp.json --html ${meta.sample_id}.fastp.html --thread ${task.cpus}
+    bash ${projectDir}/bin/stream_fastp.sh \
+      '${meta.sample_id}' \
+      '${reads[0]}' \
+      '${r2}' \
+      '${meta.read1_md5}' \
+      '${meta.read2_md5}' \
+      '${task.cpus}'
     """
     stub:
     def outputs = meta.paired ? "touch ${meta.sample_id}.trimmed.R1.fastq.gz ${meta.sample_id}.trimmed.R2.fastq.gz" : "touch ${meta.sample_id}.trimmed.R1.fastq.gz"
@@ -160,10 +165,10 @@ process BUILD_PACE_MATRIX {
     SIRT1_rep1_WGBS,SIRT1,1,1.10,DunedinPACE
     SIRT2_rep1_WGBS,SIRT2,1,1.20,DunedinPACE
     EOF
-    echo 'sample_id,matched_probes,required_probes,fraction' > pace_probe_qc.csv
+    echo 'sample_id,matched_probes,required_probes,fraction,min_cpg_depth' > pace_probe_qc.csv
     cat > pace_model_metadata.csv <<'EOF'
     model,intercept,required_background_probes,annotation,source_package
-    DunedinPACE,-1.949859,20000,IlluminaHumanMethylationEPICanno.ilm10b4.hg19,danbelsky/DunedinPACE
+    DunedinPACE,-1.949859,20000,IlluminaHumanMethylationEPICanno.ilm10b4.hg19,danbelsky/DunedinPACE@4b569983543e51d1022aecec9a25e694bb3a336a
     EOF
     """
 }
@@ -184,13 +189,13 @@ process CHIP_OCCUPANCY {
     stub:
     """
     cat > histone_occupancy.csv <<'EOF'
-    sample_id,condition,replicate,mark,occupancy,raw_union_peak_reads,mapped_reads
-    WT_rep1_H3K9ac,WT,1,H3K9ac,0,1,1
-    WT_rep1_H3K56ac,WT,1,H3K56ac,0,1,1
-    SIRT1_rep1_H3K9ac,SIRT1,1,H3K9ac,1,1,1
-    SIRT1_rep1_H3K56ac,SIRT1,1,H3K56ac,1,1,1
-    SIRT2_rep1_H3K9ac,SIRT2,1,H3K9ac,2,1,1
-    SIRT2_rep1_H3K56ac,SIRT2,1,H3K56ac,2,1,1
+    condition,replicate,mark,differential_occupancy,log2_cpm
+    WT,1,H3K9ac,0,1
+    WT,1,H3K56ac,0,1
+    SIRT1,1,H3K9ac,1,2
+    SIRT1,1,H3K56ac,1,2
+    SIRT2,1,H3K9ac,2,3
+    SIRT2,1,H3K56ac,2,3
     EOF
     """
 }
@@ -250,7 +255,7 @@ workflow {
             read1_md5: row.read1_md5 ?: '',
             read2_md5: row.read2_md5 ?: ''
         ]
-        def reads = row.fastq_2 ? [file(row.fastq_1), file(row.fastq_2)] : [file(row.fastq_1)]
+        def reads = row.fastq_2 ? [row.fastq_1, row.fastq_2] : [row.fastq_1]
         tuple(meta, reads)
     }
 
@@ -265,7 +270,7 @@ workflow {
             read1_md5: row.read1_md5 ?: '',
             read2_md5: row.read2_md5 ?: ''
         ]
-        def reads = row.fastq_2 ? [file(row.fastq_1), file(row.fastq_2)] : [file(row.fastq_1)]
+        def reads = row.fastq_2 ? [row.fastq_1, row.fastq_2] : [row.fastq_1]
         tuple(meta, reads)
     }
 
