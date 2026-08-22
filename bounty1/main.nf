@@ -5,6 +5,7 @@ params.controls_sheet = params.controls_sheet ?: 'resources/chip_inputs.csv'
 params.outdir = params.outdir ?: 'results'
 params.mapq = params.mapq ?: 30
 params.peak_qvalue = params.peak_qvalue ?: 0.01
+params.min_cpg_depth = params.min_cpg_depth ?: 6
 
 process FASTP {
     tag "${meta.sample_id}"
@@ -23,6 +24,13 @@ process FASTP {
     ${verifyR1}
     ${verifyR2}
     fastp ${ioArgs} --json ${meta.sample_id}.fastp.json --html ${meta.sample_id}.fastp.html --thread ${task.cpus}
+    """
+    stub:
+    def outputs = meta.paired ? "touch ${meta.sample_id}.trimmed.R1.fastq.gz ${meta.sample_id}.trimmed.R2.fastq.gz" : "touch ${meta.sample_id}.trimmed.R1.fastq.gz"
+    """
+    ${outputs}
+    echo '{}' > ${meta.sample_id}.fastp.json
+    echo '<html></html>' > ${meta.sample_id}.fastp.html
     """
 }
 
@@ -43,6 +51,12 @@ process ALIGN_CHIP {
     samtools index ${meta.sample_id}.mapq${params.mapq}.bam
     samtools flagstat ${meta.sample_id}.mapq${params.mapq}.bam > ${meta.sample_id}.flagstat.txt
     """
+    stub:
+    """
+    touch ${meta.sample_id}.mapq${params.mapq}.bam
+    touch ${meta.sample_id}.mapq${params.mapq}.bam.bai
+    echo '0 + 0 mapped' > ${meta.sample_id}.flagstat.txt
+    """
 }
 
 process CALL_PEAKS {
@@ -60,6 +74,11 @@ process CALL_PEAKS {
     """
     test -f ${control}
     macs3 callpeak -t ${bam} -c ${control} -f ${macsFormat} -g hs -n ${meta.sample_id} -q ${params.peak_qvalue} --keep-dup auto -B
+    """
+    stub:
+    """
+    printf 'chr1\t100\t200\t${meta.sample_id}\t100\t.\t1\t1\t1\t50\n' > ${meta.sample_id}_peaks.narrowPeak
+    printf 'chr1\t100\t200\t1\n' > ${meta.sample_id}_treat_pileup.bdg
     """
 }
 
@@ -84,6 +103,11 @@ process ALIGN_WGBS {
     samtools view -b -q ${params.mapq} \${DEDUP} | samtools sort -@ ${task.cpus} -o ${meta.sample_id}.mapq${params.mapq}.deduplicated.bam
     samtools index ${meta.sample_id}.mapq${params.mapq}.deduplicated.bam
     """
+    stub:
+    """
+    touch ${meta.sample_id}.mapq${params.mapq}.deduplicated.bam
+    touch ${meta.sample_id}.mapq${params.mapq}.deduplicated.bam.bai
+    """
 }
 
 process EXTRACT_METHYLATION {
@@ -97,10 +121,14 @@ process EXTRACT_METHYLATION {
     script:
     def pairedArg = meta.paired ? '--paired-end' : ''
     """
-    bismark_methylation_extractor ${pairedArg} --gzip --bedGraph --cytosine_report --genome_folder ${params.bismark_index} ${bam}
+    bismark_methylation_extractor ${pairedArg} --comprehensive --gzip --bedGraph ${bam}
     COV=\$(find . -name '*.bismark.cov.gz' | head -n1)
     test -n "\${COV}"
     mv \${COV} ${meta.sample_id}.bismark.cov.gz
+    """
+    stub:
+    """
+    printf 'chr1\t100\t100\t50\t3\t3\n' | gzip -c > ${meta.sample_id}.bismark.cov.gz
     """
 }
 
@@ -121,7 +149,22 @@ process BUILD_PACE_MATRIX {
       --scores dunedinpace_scores.csv \
       --qc pace_probe_qc.csv \
       --model-metadata pace_model_metadata.csv \
-      --min-probe-fraction ${params.min_required_probe_fraction}
+      --min-probe-fraction ${params.min_required_probe_fraction} \
+      --min-depth ${params.min_cpg_depth}
+    """
+    stub:
+    """
+    cat > dunedinpace_scores.csv <<'EOF'
+    sample_id,condition,replicate,dunedinpace,model
+    WT_rep1_WGBS,WT,1,1.00,DunedinPACE
+    SIRT1_rep1_WGBS,SIRT1,1,1.10,DunedinPACE
+    SIRT2_rep1_WGBS,SIRT2,1,1.20,DunedinPACE
+    EOF
+    echo 'sample_id,matched_probes,required_probes,fraction' > pace_probe_qc.csv
+    cat > pace_model_metadata.csv <<'EOF'
+    model,intercept,required_background_probes,annotation,source_package
+    DunedinPACE,-1.949859,20000,IlluminaHumanMethylationEPICanno.ilm10b4.hg19,danbelsky/DunedinPACE
+    EOF
     """
 }
 
@@ -138,6 +181,18 @@ process CHIP_OCCUPANCY {
     """
     python3 ${projectDir}/bin/compute_chip_occupancy.py --peaks-glob '*_peaks.narrowPeak' --bam-glob '*.bam' --output histone_occupancy.csv
     """
+    stub:
+    """
+    cat > histone_occupancy.csv <<'EOF'
+    sample_id,condition,replicate,mark,occupancy,raw_union_peak_reads,mapped_reads
+    WT_rep1_H3K9ac,WT,1,H3K9ac,0,1,1
+    WT_rep1_H3K56ac,WT,1,H3K56ac,0,1,1
+    SIRT1_rep1_H3K9ac,SIRT1,1,H3K9ac,1,1,1
+    SIRT1_rep1_H3K56ac,SIRT1,1,H3K56ac,1,1,1
+    SIRT2_rep1_H3K9ac,SIRT2,1,H3K9ac,2,1,1
+    SIRT2_rep1_H3K56ac,SIRT2,1,H3K56ac,2,1,1
+    EOF
+    """
 }
 
 process CORRELATE {
@@ -151,6 +206,12 @@ process CORRELATE {
     script:
     """
     python3 ${projectDir}/bin/correlate.py --pace ${scores} --occupancy ${occupancy} --output correlations.json
+    """
+    stub:
+    """
+    cat > correlations.json <<'EOF'
+    {"H3K9ac_vs_DunedinPACE":{"pearson_r":1.0,"p_value":0.0,"n":3},"H3K56ac_vs_DunedinPACE":{"pearson_r":1.0,"p_value":0.0,"n":3},"n_paired":3}
+    EOF
     """
 }
 
@@ -170,6 +231,10 @@ process MANIFEST {
       --mapq ${params.mapq} \
       --peak-fdr ${params.peak_qvalue} \
       --output manifest.json
+    """
+    stub:
+    """
+    echo '{}' > manifest.json
     """
 }
 
