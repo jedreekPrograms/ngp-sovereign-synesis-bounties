@@ -100,11 +100,40 @@ def test_r_pipeline_uses_upstream_api_background_probes_and_model_intercept():
     assert 'DunedinPACE.getRequiredProbes' not in text
 
 
-def test_paired_wgbs_stays_name_sorted_for_methylation_extraction():
+def test_production_wgbs_is_streamed_and_target_bounded():
     text = (ROOT/'main.nf').read_text()
-    wgbs = text.split('process ALIGN_WGBS {', 1)[1].split('process EXTRACT_METHYLATION {', 1)[0]
-    assert 'samtools sort -n' in wgbs
-    assert 'deduplicated.name.bam' in wgbs
-    assert 'samtools index' not in wgbs
-    extractor = text.split('process EXTRACT_METHYLATION {', 1)[1].split('process BUILD_PACE_MATRIX {', 1)[0]
-    assert '--paired-end' in extractor
+    wgbs = text.split('process ALIGN_WGBS_STREAM {', 1)[1].split(
+        'process EXTRACT_METHYLATION_STREAM {', 1
+    )[0]
+    assert 'stream_wgbs_bwameth.sh' in wgbs
+    assert '.pace-targets.deduplicated.bam' in wgbs
+    assert 'read1_md5' in wgbs
+    assert 'read2_md5' in wgbs
+
+    helper = (ROOT/'bin/stream_wgbs_bwameth.sh').read_text()
+    assert '--interleaved_in' in helper
+    assert '--stdout' in helper
+    assert 'bwameth.py' in helper
+    assert 'samtools view -bh -q' in helper
+    assert '-L "$target_bed"' in helper
+
+
+def test_streaming_methylation_uses_methyldackel_and_normalizes_coordinates():
+    text = (ROOT/'main.nf').read_text()
+    extractor = text.split('process EXTRACT_METHYLATION_STREAM {', 1)[1].split(
+        'process BUILD_PACE_MATRIX {', 1
+    )[0]
+    assert 'MethylDackel extract' in extractor
+    assert 'methyldackel_to_bismark.py' in extractor
+    assert '--minDepth 1' in extractor
+    assert 'bismark_methylation_extractor' not in extractor
+
+
+def test_one_run_graph_prepares_reference_and_emits_pdf_report():
+    text = (ROOT/'main.nf').read_text()
+    assert 'process PREPARE_REFERENCE {' in text
+    assert 'bwameth.py index reference/hg19.fa' in text
+    assert 'bowtie2-build' in text
+    assert 'process REPORT {' in text
+    assert 'generate_report.py' in text
+    assert 'supplementary_report.pdf' in text
