@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'bin'))
 import correlate
+import compute_chip_occupancy as occupancy
 
 
 def test_pearson_requires_three():
@@ -28,6 +29,24 @@ def test_compute_pairs_by_condition_and_replicate():
     out = correlate.compute(pace, occ)
     assert out['n_paired'] == 4
     assert out['H3K9ac_vs_DunedinPACE']['pearson_r'] > 0.99
+
+
+def test_fragment_representative_counts_one_mate_per_pair():
+    class Read:
+        def __init__(self, **kw):
+            self.is_unmapped = kw.get('is_unmapped', False)
+            self.is_secondary = kw.get('is_secondary', False)
+            self.is_supplementary = kw.get('is_supplementary', False)
+            self.is_paired = kw.get('is_paired', True)
+            self.is_proper_pair = kw.get('is_proper_pair', True)
+            self.is_read1 = kw.get('is_read1', True)
+
+    assert occupancy.is_fragment_representative(Read(is_read1=True)) is True
+    assert occupancy.is_fragment_representative(Read(is_read1=False)) is False
+    assert occupancy.is_fragment_representative(Read(is_proper_pair=False)) is False
+    assert occupancy.is_fragment_representative(Read(is_secondary=True)) is False
+    assert occupancy.is_fragment_representative(Read(is_supplementary=True)) is False
+    assert occupancy.is_fragment_representative(Read(is_paired=False)) is True
 
 
 def test_manifest_uses_model_metadata_and_marks_data_as_non_synthetic(tmp_path):
