@@ -163,20 +163,48 @@ jobs:
           docker run --rm -v "$PWD/bench:/bench" bounty1-pace:prefilter-bench bash -lc '
             set -euo pipefail
             cd /bench/out
-            rm -f bsmap.names.txt bsmap.R1.names.txt bsmap.R2.names.txt bsmap.*.stderr.log bsmap.which.log
-            # Run the two mates sequentially through the dedicated BSMAP env.
-            # This avoids libmamba/environment races while preserving the
-            # permissive "either mate maps" union used by this recall test.
+            rm -f bsmap.names.txt bsmap.R1.names.txt bsmap.R2.names.txt bsmap.*.sam bsmap.*.stderr.log bsmap.which.log
+            # BSMAP 2.90 predates modern samtools. Keep it isolated from the
+            # samtools parser: write SAM to disk and extract mapped qnames with
+            # a tiny format-stable parser. The biological alignment parameters
+            # and permissive "either mate maps" union are unchanged.
             micromamba run -n bsmap which bsmap > bsmap.which.log 2>&1
             for mate in R1 R2; do
               : > "bsmap.${mate}.stderr.log"
               micromamba run -n bsmap bsmap \
                 -a "/bench/raw/WT_rep1.clean.${mate}.fastq.gz" \
                 -d /bench/ref/pace-screen.fa \
+                -o "/bench/out/bsmap.${mate}.sam" \
                 -p 2 -3 -n 1 -s 12 -v 0.12 -g 3 -r 1 \
-                2> "bsmap.${mate}.stderr.log" | \
-              samtools view -F 4 - | cut -f1 | sed -E "s#/([12])$##" | sort -u \
-                > "bsmap.${mate}.names.txt"
+                2> "bsmap.${mate}.stderr.log"
+              test -s "bsmap.${mate}.sam"
+              python3 - "bsmap.${mate}.sam" "bsmap.${mate}.names.txt" <<'PY'
+          import re
+          import sys
+
+          sam_path, out_path = sys.argv[1:]
+          seen = set()
+          with open(sam_path, 'rt', encoding='utf-8', errors='strict') as src:
+              for line_no, line in enumerate(src, 1):
+                  if not line or line.startswith('@'):
+                      continue
+                  fields = line.rstrip('\n').split('\t')
+                  if len(fields) < 11:
+                      raise SystemExit(f'invalid BSMAP SAM line {line_no}: {line[:120]!r}')
+                  try:
+                      flag = int(fields[1])
+                  except ValueError as exc:
+                      raise SystemExit(f'invalid BSMAP SAM flag at line {line_no}: {fields[1]!r}') from exc
+                  if flag & 4:
+                      continue
+                  seen.add(re.sub(r'/[12]$', '', fields[0]))
+          if not seen:
+              raise SystemExit(f'no mapped BSMAP reads found in {sam_path}')
+          with open(out_path, 'wt', encoding='utf-8') as dst:
+              for name in sorted(seen):
+                  dst.write(name + '\n')
+          PY
+              rm -f "bsmap.${mate}.sam"
               test -s "bsmap.${mate}.names.txt"
             done
             sort -u bsmap.R1.names.txt bsmap.R2.names.txt > bsmap.names.txt
