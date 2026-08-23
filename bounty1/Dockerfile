@@ -28,6 +28,14 @@ RUN micromamba install -y -n base -c conda-forge -c bioconda \
       bioconductor-illuminahumanmethylationepicanno.ilm10b4.hg19=0.6.0 \
     && micromamba clean --all --yes
 
+# BSMAP is kept in an isolated environment because the Bioconda 2.90 build has
+# legacy runtime dependencies. It is used only by the experimental, fail-closed
+# WGBS prefilter benchmark; final production alignment remains bwa-meth against
+# the complete hg19 reference.
+RUN micromamba create -y -n bsmap -c conda-forge -c bioconda \
+      bsmap=2.90 \
+    && micromamba clean --all --yes
+
 # MethylDackel 0.6.1 currently links against htslib <1.24, while the primary
 # workflow intentionally pins samtools/htslib 1.24. Keep the extractor in an
 # isolated environment rather than weakening the primary toolchain pin.
