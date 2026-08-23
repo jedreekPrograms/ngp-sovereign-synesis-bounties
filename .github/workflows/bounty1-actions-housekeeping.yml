@@ -63,7 +63,33 @@ jobs:
             done
           }
 
+          supersede_legacy_wgbs_if_v2_exists() {
+            local v2 legacy
+            v2=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/bounty1-wgbs-cohort-v2.yml/runs?branch=${GITHUB_HEAD_REF}&per_page=20")
+            if ! jq -e '.workflow_runs[] | select(.status == "in_progress" or .status == "queued" or .status == "requested" or .status == "waiting" or .status == "pending")' \
+              <<<"$v2" >/dev/null; then
+              echo 'WGBS v2 has no active/pending run; legacy cohort left untouched.'
+              return
+            fi
+
+            legacy=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/bounty1-wgbs-cohort.yml/runs?branch=${GITHUB_HEAD_REF}&per_page=20")
+            mapfile -t legacy_active < <(
+              jq -r '.workflow_runs[] | select(.status == "in_progress" or .status == "queued" or .status == "requested" or .status == "waiting" or .status == "pending") | .id' \
+                <<<"$legacy"
+            )
+            for run_id in "${legacy_active[@]}"; do
+              echo "WGBS v2 supersedes legacy run ${run_id}; cancelling legacy run."
+              gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/cancel" >/dev/null || true
+            done
+          }
+
+          # Migration rule first: a waiting/running v2 is always preferred over
+          # the known-slow legacy cohort. This prevents a stale legacy run from
+          # holding the shared concurrency group until timeout.
+          supersede_legacy_wgbs_if_v2_exists
+
           clean_workflow bounty1-full-wgbs-benchmark.yml
           clean_workflow bounty1-full-chromatin-benchmark.yml
-          clean_workflow bounty1-wgbs-cohort.yml
           clean_workflow bounty1-wgbs-cohort-v2.yml
