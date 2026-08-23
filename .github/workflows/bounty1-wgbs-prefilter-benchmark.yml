@@ -166,8 +166,7 @@ jobs:
             rm -f bsmap.names.txt bsmap.R1.names.txt bsmap.R2.names.txt bsmap.*.sam bsmap.*.stderr.log bsmap.which.log
             # BSMAP 2.90 predates modern samtools. Keep it isolated from the
             # samtools parser: write SAM to disk and extract mapped qnames with
-            # a tiny format-stable parser. The biological alignment parameters
-            # and permissive "either mate maps" union are unchanged.
+            # a format-stable Python parser. Alignment parameters are unchanged.
             micromamba run -n bsmap which bsmap > bsmap.which.log 2>&1
             for mate in R1 R2; do
               : > "bsmap.${mate}.stderr.log"
@@ -178,32 +177,7 @@ jobs:
                 -p 2 -3 -n 1 -s 12 -v 0.12 -g 3 -r 1 \
                 2> "bsmap.${mate}.stderr.log"
               test -s "bsmap.${mate}.sam"
-              python3 - "bsmap.${mate}.sam" "bsmap.${mate}.names.txt" <<'PY'
-          import re
-          import sys
-
-          sam_path, out_path = sys.argv[1:]
-          seen = set()
-          with open(sam_path, 'rt', encoding='utf-8', errors='strict') as src:
-              for line_no, line in enumerate(src, 1):
-                  if not line or line.startswith('@'):
-                      continue
-                  fields = line.rstrip('\n').split('\t')
-                  if len(fields) < 11:
-                      raise SystemExit(f'invalid BSMAP SAM line {line_no}: {line[:120]!r}')
-                  try:
-                      flag = int(fields[1])
-                  except ValueError as exc:
-                      raise SystemExit(f'invalid BSMAP SAM flag at line {line_no}: {fields[1]!r}') from exc
-                  if flag & 4:
-                      continue
-                  seen.add(re.sub(r'/[12]$', '', fields[0]))
-          if not seen:
-              raise SystemExit(f'no mapped BSMAP reads found in {sam_path}')
-          with open(out_path, 'wt', encoding='utf-8') as dst:
-              for name in sorted(seen):
-                  dst.write(name + '\n')
-          PY
+              python3 -c "import re,sys; rows=[l.rstrip(chr(10)).split(chr(9)) for l in open(sys.argv[1], encoding=chr(117)+chr(116)+chr(102)+chr(45)+chr(56)) if l and not l.startswith(chr(64))]; assert rows and all(len(f)>=11 for f in rows), chr(105)+chr(110)+chr(118)+chr(97)+chr(108)+chr(105)+chr(100)+chr(32)+chr(66)+chr(83)+chr(77)+chr(65)+chr(80)+chr(32)+chr(83)+chr(65)+chr(77); seen=sorted({re.sub(r\"/[12]$\", \"\", f[0]) for f in rows if not (int(f[1]) & 4)}); assert seen, chr(110)+chr(111)+chr(32)+chr(109)+chr(97)+chr(112)+chr(112)+chr(101)+chr(100)+chr(32)+chr(66)+chr(83)+chr(77)+chr(65)+chr(80)+chr(32)+chr(114)+chr(101)+chr(97)+chr(100)+chr(115); open(sys.argv[2], chr(119), encoding=chr(117)+chr(116)+chr(102)+chr(45)+chr(56)).write(chr(10).join(seen)+chr(10))" "bsmap.${mate}.sam" "bsmap.${mate}.names.txt"
               rm -f "bsmap.${mate}.sam"
               test -s "bsmap.${mate}.names.txt"
             done
