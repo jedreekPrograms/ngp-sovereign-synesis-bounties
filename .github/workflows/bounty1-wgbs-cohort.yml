@@ -8,9 +8,14 @@ on:
         required: true
         default: '^(WT|SIRT[1-7])_rep[12]_WGBS$'
       max_parallel:
-        description: Maximum number of WGBS shards to run concurrently
+        description: Maximum number of WGBS samples to process concurrently
         required: true
-        default: '2'
+        default: '8'
+  push:
+    branches:
+      - bounty-1-real-pipeline
+    paths:
+      - 'bounty1/cohort.trigger'
 
 concurrency:
   group: bounty1-wgbs-cohort-${{ github.ref }}
@@ -27,7 +32,7 @@ jobs:
       - id: matrix
         name: Build WGBS matrix from validated production metadata
         env:
-          SAMPLE_REGEX: ${{ inputs.sample_regex }}
+          SAMPLE_REGEX: ${{ inputs.sample_regex || '^(WT|SIRT[1-7])_rep[12]_WGBS$' }}
         run: |
           set -euo pipefail
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
@@ -60,7 +65,7 @@ jobs:
     timeout-minutes: 355
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJSON(inputs.max_parallel) }}
+      max-parallel: ${{ fromJSON(inputs.max_parallel || '8') }}
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
@@ -75,55 +80,182 @@ jobs:
           cache-from: type=gha,scope=bounty1-docker
           cache-to: type=gha,mode=max,scope=bounty1-docker
 
-      - name: Prepare verified hg19 reference and official PACE windows
-        run: |
-          set -euo pipefail
-          mkdir -p shard/ref shard/out shard/qc
-          curl -fsSL --retry 5 --retry-delay 5 \
-            -o shard/ref/hg19.fa.gz \
-            https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz
-          curl -fsSL --retry 5 --retry-delay 5 \
-            -o shard/ref/md5sum.txt \
-            https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/md5sum.txt
-          (
-            cd shard/ref
-            grep -E '[[:space:]]hg19.fa.gz$' md5sum.txt > hg19.fa.gz.md5
-            md5sum --check hg19.fa.gz.md5
-            gzip -d hg19.fa.gz
-          )
-          docker run --rm -v "$PWD/shard:/shard" bounty1-pace:wgbs-cohort bash -lc '
-            set -euo pipefail
-            samtools faidx /shard/ref/hg19.fa
-            bwameth.py index /shard/ref/hg19.fa
-            Rscript /work/bin/export_pace_regions.R --output /shard/ref/pace.bed --flank 500
-            test -s /shard/ref/pace.bed
-          '
-
-      - name: Stream complete WGBS source through production PACE-target path
+      - name: Prepare verified hg19 and complete source FASTQs in parallel
         env:
           SAMPLE_ID: ${{ matrix.sample_id }}
-          R1: ${{ matrix.r1 }}
-          R2: ${{ matrix.r2 }}
+          R1_URL: ${{ matrix.r1 }}
+          R2_URL: ${{ matrix.r2 }}
           MD5_R1: ${{ matrix.md5_r1 }}
           MD5_R2: ${{ matrix.md5_r2 }}
         run: |
           set -euo pipefail
-          START=$(date +%s)
+          mkdir -p shard/ref shard/raw shard/out shard/qc
+
+          prepare_reference() {
+            local start end
+            start=$(date +%s)
+            curl -fsSL --retry 5 --retry-delay 5 \
+              -o shard/ref/hg19.fa.gz \
+              https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz
+            curl -fsSL --retry 5 --retry-delay 5 \
+              -o shard/ref/md5sum.txt \
+              https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/md5sum.txt
+            (
+              cd shard/ref
+              grep -E '[[:space:]]hg19.fa.gz$' md5sum.txt > hg19.fa.gz.md5
+              md5sum --check hg19.fa.gz.md5
+              gzip -d hg19.fa.gz
+            )
+
+            docker run --rm -v "$PWD/shard:/shard" bounty1-pace:wgbs-cohort bash -lc '
+              set -euo pipefail
+              samtools faidx /shard/ref/hg19.fa
+              Rscript /work/bin/export_pace_regions.R --output /shard/ref/pace.bed --flank 500
+              Rscript /work/bin/export_pace_regions.R --output /shard/ref/pace-screen.raw.bed --flank 10000
+            '
+
+            python3 - <<'PY'
+          from collections import defaultdict
+          from pathlib import Path
+
+          src = Path('shard/ref/pace-screen.raw.bed')
+          dst = Path('shard/ref/pace-screen.merged.bed')
+          by_chrom = defaultdict(list)
+          for line in src.read_text(encoding='utf-8').splitlines():
+              if not line or line.startswith('#'):
+                  continue
+              fields = line.split('\t')
+              chrom, start, end = fields[0], int(fields[1]), int(fields[2])
+              by_chrom[chrom].append((start, end))
+
+          with dst.open('w', encoding='utf-8') as out:
+              for chrom in sorted(by_chrom):
+                  merged = []
+                  for start, end in sorted(by_chrom[chrom]):
+                      if not merged or start > merged[-1][1]:
+                          merged.append([start, end])
+                      else:
+                          merged[-1][1] = max(merged[-1][1], end)
+                  for start, end in merged:
+                      out.write(f'{chrom}\t{start}\t{end}\n')
+          PY
+
+            docker run --rm -v "$PWD/shard:/shard" bounty1-pace:wgbs-cohort bash -lc '
+              set -euo pipefail
+              : > /shard/ref/pace-screen.fa
+              while read -r chrom start end; do
+                samtools faidx /shard/ref/hg19.fa "${chrom}:$((start + 1))-${end}"
+              done < /shard/ref/pace-screen.merged.bed >> /shard/ref/pace-screen.fa
+              test -s /shard/ref/pace-screen.fa
+              samtools faidx /shard/ref/pace-screen.fa
+              bwameth.py index /shard/ref/pace-screen.fa
+              bwameth.py index /shard/ref/hg19.fa
+            '
+            end=$(date +%s)
+            echo $((end-start)) > shard/qc/reference-wall-seconds.txt
+            du -sh shard/ref > shard/qc/reference-size.txt
+          }
+
+          download_inputs() {
+            local start end r1_pid r2_pid r1_status r2_status
+            start=$(date +%s)
+            curl --fail --location --show-error --silent \
+              --retry 20 --retry-delay 10 --retry-all-errors --connect-timeout 30 \
+              --continue-at - --output "shard/raw/${SAMPLE_ID}.R1.fastq.gz" "$R1_URL" &
+            r1_pid=$!
+            curl --fail --location --show-error --silent \
+              --retry 20 --retry-delay 10 --retry-all-errors --connect-timeout 30 \
+              --continue-at - --output "shard/raw/${SAMPLE_ID}.R2.fastq.gz" "$R2_URL" &
+            r2_pid=$!
+            set +e
+            wait "$r1_pid"; r1_status=$?
+            wait "$r2_pid"; r2_status=$?
+            set -e
+            printf 'R1 curl exit=%s\nR2 curl exit=%s\n' "$r1_status" "$r2_status" > "shard/qc/${SAMPLE_ID}.download-status.txt"
+            if (( r1_status != 0 || r2_status != 0 )); then
+              return 1
+            fi
+            echo "${MD5_R1}  shard/raw/${SAMPLE_ID}.R1.fastq.gz" | md5sum --check
+            echo "${MD5_R2}  shard/raw/${SAMPLE_ID}.R2.fastq.gz" | md5sum --check
+            gzip -t "shard/raw/${SAMPLE_ID}.R1.fastq.gz"
+            gzip -t "shard/raw/${SAMPLE_ID}.R2.fastq.gz"
+            end=$(date +%s)
+            echo $((end-start)) > "shard/qc/${SAMPLE_ID}.download-wall-seconds.txt"
+            du -sh shard/raw > "shard/qc/${SAMPLE_ID}.raw-size.txt"
+          }
+
+          start=$(date +%s)
+          prepare_reference > shard/qc/reference-prep.log 2>&1 &
+          ref_pid=$!
+          download_inputs > "shard/qc/${SAMPLE_ID}.download.log" 2>&1 &
+          dl_pid=$!
+          set +e
+          wait "$ref_pid"; ref_status=$?
+          wait "$dl_pid"; dl_status=$?
+          set -e
+          printf 'reference exit=%s\ndownload exit=%s\n' "$ref_status" "$dl_status" > "shard/qc/${SAMPLE_ID}.parallel-prep-status.txt"
+          if (( ref_status != 0 || dl_status != 0 )); then
+            echo 'Parallel preparation failed; inspect QC logs' >&2
+            exit 1
+          fi
+          end=$(date +%s)
+          echo $((end-start)) > "shard/qc/${SAMPLE_ID}.parallel-prep-wall-seconds.txt"
+          df -h > "shard/qc/${SAMPLE_ID}.disk-after-prep.txt"
+
+      - name: Prefilter complete WGBS to conservative PACE candidates
+        env:
+          SAMPLE_ID: ${{ matrix.sample_id }}
+          MD5_R1: ${{ matrix.md5_r1 }}
+          MD5_R2: ${{ matrix.md5_r2 }}
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
           docker run --rm \
-            -e SAMPLE_ID -e R1 -e R2 -e MD5_R1 -e MD5_R2 \
-            -e WGBS_SORT_MEM=256M \
+            -e SAMPLE_ID -e MD5_R1 -e MD5_R2 \
+            -v "$PWD/shard:/shard" \
+            bounty1-pace:wgbs-cohort bash -lc '
+              set -euo pipefail
+              cd /shard/out
+              bash /work/bin/screen_wgbs_pace_candidates.sh \
+                "$SAMPLE_ID" \
+                "/shard/raw/${SAMPLE_ID}.R1.fastq.gz" \
+                "/shard/raw/${SAMPLE_ID}.R2.fastq.gz" \
+                "$MD5_R1" "$MD5_R2" \
+                /shard/ref/pace-screen.fa 4
+            '
+          end=$(date +%s)
+          echo $((end-start)) > "shard/qc/${SAMPLE_ID}.prefilter-wall-seconds.txt"
+          cp "shard/out/${SAMPLE_ID}.candidate-pair-count.txt" shard/qc/
+          cp "shard/out/${SAMPLE_ID}.candidate-fastq-size.txt" shard/qc/
+          test -s "shard/out/${SAMPLE_ID}.candidate.R1.fastq.gz"
+          test -s "shard/out/${SAMPLE_ID}.candidate.R2.fastq.gz"
+          rm -f "shard/raw/${SAMPLE_ID}.R1.fastq.gz" "shard/raw/${SAMPLE_ID}.R2.fastq.gz"
+          df -h > "shard/qc/${SAMPLE_ID}.disk-after-prefilter.txt"
+
+      - name: Align PACE candidates to complete hg19 production path
+        env:
+          SAMPLE_ID: ${{ matrix.sample_id }}
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          docker run --rm \
+            -e SAMPLE_ID -e WGBS_SKIP_FASTP=1 -e WGBS_SORT_MEM=256M \
             -v "$PWD/shard:/shard" \
             bounty1-pace:wgbs-cohort bash -lc '
               set -euo pipefail
               cd /shard/out
               bash /work/bin/stream_wgbs_bwameth.sh \
-                "$SAMPLE_ID" "$R1" "$R2" "$MD5_R1" "$MD5_R2" \
+                "$SAMPLE_ID" \
+                "${SAMPLE_ID}.candidate.R1.fastq.gz" \
+                "${SAMPLE_ID}.candidate.R2.fastq.gz" \
+                "" "" \
                 /shard/ref/hg19.fa /shard/ref/pace.bed 30 4
             '
-          END=$(date +%s)
-          echo $((END-START)) > "shard/qc/${SAMPLE_ID}.alignment-wall-seconds.txt"
+          end=$(date +%s)
+          echo $((end-start)) > "shard/qc/${SAMPLE_ID}.full-hg19-candidate-wall-seconds.txt"
           test -s "shard/out/${SAMPLE_ID}.mapq30.pace-targets.deduplicated.bam"
           test -s "shard/out/${SAMPLE_ID}.mapq30.pace-targets.deduplicated.bam.bai"
+          rm -f "shard/out/${SAMPLE_ID}.candidate.R1.fastq.gz" "shard/out/${SAMPLE_ID}.candidate.R2.fastq.gz"
 
       - name: Extract PACE-region CpG methylation
         env:
@@ -157,12 +289,11 @@ jobs:
         run: |
           set +e
           mkdir -p shard/qc
+          cp shard/out/${SAMPLE_ID}.pace-screen.* shard/qc/ 2>/dev/null || true
           cp "shard/out/${SAMPLE_ID}.source-stream.log" shard/qc/ 2>/dev/null || true
-          cp "shard/out/${SAMPLE_ID}.fastp.stderr.log" shard/qc/ 2>/dev/null || true
           cp "shard/out/${SAMPLE_ID}.bwameth.stderr.log" shard/qc/ 2>/dev/null || true
           cp "shard/out/${SAMPLE_ID}.samtools-view.stderr.log" shard/qc/ 2>/dev/null || true
           cp "shard/out/${SAMPLE_ID}.pipeline-status.txt" shard/qc/ 2>/dev/null || true
-          cp "shard/out/${SAMPLE_ID}.fastp.json" shard/qc/ 2>/dev/null || true
           cp "shard/out/${SAMPLE_ID}.pace-targets.flagstat.txt" shard/qc/ 2>/dev/null || true
           df -h > "shard/qc/${SAMPLE_ID}.final-disk.txt"
           du -sh shard > "shard/qc/${SAMPLE_ID}.final-working-set.txt" 2>/dev/null || true
@@ -171,9 +302,12 @@ jobs:
           condition=${CONDITION}
           replicate=${REPLICATE}
           run_accession=${RUN_ACCESSION}
-          source_scope=complete paired FASTQ archives streamed from production metadata
-          reference=UCSC hg19 checksum-verified
-          mapq_threshold=30
+          source_scope=complete paired FASTQ archives, published MD5 verified before screening
+          prefilter=fastp once then bisulfite screen against merged DunedinPACE +/-10000bp windows; keep pair if either primary mate maps
+          final_reference=complete checksum-verified UCSC hg19
+          final_mapq_threshold=30
+          final_target_scope=official DunedinPACE probe windows +/-500bp
+          duplicate_removal=after complete-hg19 candidate alignment within each biological sample
           methylation_min_depth_raw=1
           final_dunedinpace_min_depth=6
           EOF
@@ -211,6 +345,7 @@ jobs:
       - name: Compute measured DunedinPACE scores
         run: |
           set -euo pipefail
+          test "$(find cohort-cov -name '*.bismark.cov.gz' | wc -l)" -eq "${{ needs.plan.outputs.count }}"
           test "$(find cohort-cov -name '*.bismark.cov.gz' | wc -l)" -ge 3
           docker run --rm \
             -v "$PWD/cohort-cov:/cohort:ro" \
