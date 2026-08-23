@@ -7,6 +7,8 @@ on:
       - main
     paths:
       - '.github/workflows/bounty1-wgbs-prefilter-benchmark.yml'
+      - 'bounty1/Dockerfile'
+      - 'bounty1/bin/benchmark_wgbs_prefilters.sh'
 
 permissions:
   contents: read
@@ -154,18 +156,50 @@ jobs:
           end=$(date +%s)
           echo $((end-start)) > bench/out/bismark.seconds.txt
 
-      - name: Require candidate superset and summarize
+      - name: Benchmark permissive BSMAP single-mate screen
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          docker run --rm -v "$PWD/bench:/bench" bounty1-pace:prefilter-bench bash -lc '
+            set -euo pipefail
+            cd /bench/out
+            rm -f bsmap.names.txt bsmap.R1.names.txt bsmap.R2.names.txt
+            run_mate() {
+              mate="$1"
+              micromamba run -n bsmap bsmap \
+                -a "/bench/raw/WT_rep1.clean.${mate}.fastq.gz" \
+                -d /bench/ref/pace-screen.fa \
+                -p 2 -3 -n 1 -s 12 -v 0.12 -g 3 -r 1 \
+                2> "bsmap.${mate}.stderr.log" | \
+              samtools view -F 4 - | cut -f1 | sed -E "s#/([12])$##" | sort -u \
+                > "bsmap.${mate}.names.txt"
+            }
+            run_mate R1 & p1=$!
+            run_mate R2 & p2=$!
+            wait "$p1"
+            wait "$p2"
+            sort -u bsmap.R1.names.txt bsmap.R2.names.txt > bsmap.names.txt
+          '
+          end=$(date +%s)
+          echo $((end-start)) > bench/out/bsmap.seconds.txt
+
+      - name: Require candidate supersets and summarize
         run: |
           set -euo pipefail
           comm -23 bench/out/bwameth.names.txt bench/out/bismark.names.txt > bench/out/bwameth-missed-by-bismark.txt
+          comm -23 bench/out/bwameth.names.txt bench/out/bsmap.names.txt > bench/out/bwameth-missed-by-bsmap.txt
           bw=$(wc -l < bench/out/bwameth.names.txt)
           bi=$(wc -l < bench/out/bismark.names.txt)
-          miss=$(wc -l < bench/out/bwameth-missed-by-bismark.txt)
+          bs=$(wc -l < bench/out/bsmap.names.txt)
+          bimiss=$(wc -l < bench/out/bwameth-missed-by-bismark.txt)
+          bsmiss=$(wc -l < bench/out/bwameth-missed-by-bsmap.txt)
           bwsec=$(cat bench/out/bwameth.seconds.txt)
           bisec=$(cat bench/out/bismark.seconds.txt)
-          printf 'reads_per_mate=200000\nbwameth_candidate_names=%s\nbismark_candidate_names=%s\nbwameth_missed_by_bismark=%s\nbwameth_seconds=%s\nbismark_seconds=%s\n' \
-            "$bw" "$bi" "$miss" "$bwsec" "$bisec" | tee bench/out/summary.txt
-          test "$miss" -eq 0
+          bssec=$(cat bench/out/bsmap.seconds.txt)
+          printf 'reads_per_mate=200000\nbwameth_candidate_names=%s\nbismark_candidate_names=%s\nbsmap_candidate_names=%s\nbwameth_missed_by_bismark=%s\nbwameth_missed_by_bsmap=%s\nbwameth_seconds=%s\nbismark_seconds=%s\nbsmap_seconds=%s\n' \
+            "$bw" "$bi" "$bs" "$bimiss" "$bsmiss" "$bwsec" "$bisec" "$bssec" | tee bench/out/summary.txt
+          test "$bimiss" -eq 0
+          test "$bsmiss" -eq 0
 
       - name: Upload benchmark evidence
         if: always()
