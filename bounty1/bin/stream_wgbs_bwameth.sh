@@ -4,10 +4,15 @@ set -euo pipefail
 # Disk-bounded WGBS path.
 #
 # R1/R2 may be URLs or local compressed FASTQs. stream_interleaved_fastq.py
-# validates the exact compressed source bytes while emitting interleaved FASTQ;
-# fastp remains a stream; bwa-meth aligns the complete passing-read stream; only
-# MAPQ-filtered alignments overlapping the official DunedinPACE probe windows
-# are retained.
+# validates the exact compressed source bytes while emitting interleaved FASTQ.
+# By default fastp remains a stream; bwa-meth aligns the complete passing-read
+# stream; only MAPQ-filtered alignments overlapping the official DunedinPACE
+# probe windows are retained.
+#
+# When WGBS_SKIP_FASTP=1, the input FASTQs are assumed to be the already-cleaned
+# output of screen_wgbs_pace_candidates.sh. This avoids applying fastp twice;
+# the candidate reads are still aligned against the complete genome reference,
+# so final MAPQ and target selection are unchanged.
 #
 # IMPORTANT: the expensive name-sort is deliberately performed *after* bwa-meth
 # has finished. Running bwa-meth and samtools sort concurrently on a 16-GiB
@@ -35,6 +40,7 @@ target_bed="$7"
 mapq="$8"
 threads="$9"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+skip_fastp="${WGBS_SKIP_FASTP:-0}"
 
 if [[ -z "$r2_source" ]]; then
   echo "streaming bwa-meth path currently requires paired-end WGBS" >&2
@@ -56,6 +62,10 @@ if ! [[ "$threads" =~ ^[0-9]+$ ]] || (( threads < 1 )); then
   echo "THREADS must be a positive integer" >&2
   exit 2
 fi
+if [[ "$skip_fastp" != "0" && "$skip_fastp" != "1" ]]; then
+  echo "WGBS_SKIP_FASTP must be 0 or 1" >&2
+  exit 2
+fi
 
 fastp_threads="$threads"
 if (( fastp_threads > 2 )); then
@@ -71,37 +81,60 @@ status_file="${sample_id}.pipeline-status.txt"
 
 # Do not let `set -e` hide which member of this long pipeline failed.
 set +e
-python3 "${script_dir}/stream_interleaved_fastq.py" \
-  --r1-source "$r1_source" \
-  --r2-source "$r2_source" \
-  --r1-md5 "$r1_md5" \
-  --r2-md5 "$r2_md5" \
-  2> "${sample_id}.source-stream.log" | \
-fastp \
-  --stdin \
-  --interleaved_in \
-  --stdout \
-  --json "${sample_id}.fastp.json" \
-  --html "${sample_id}.fastp.html" \
-  --thread "$fastp_threads" \
-  2> "${sample_id}.fastp.stderr.log" | \
-bwameth.py \
-  --threads "$threads" \
-  --interleaved \
-  --reference "$reference" \
-  /dev/stdin \
-  2> "${sample_id}.bwameth.stderr.log" | \
-samtools view -bh -q "$mapq" -L "$target_bed" -o "$target_bam" - \
-  2> "${sample_id}.samtools-view.stderr.log"
-pipe_status=("${PIPESTATUS[@]}")
+if [[ "$skip_fastp" == "1" ]]; then
+  python3 "${script_dir}/stream_interleaved_fastq.py" \
+    --r1-source "$r1_source" \
+    --r2-source "$r2_source" \
+    --r1-md5 "$r1_md5" \
+    --r2-md5 "$r2_md5" \
+    2> "${sample_id}.source-stream.log" | \
+  bwameth.py \
+    --threads "$threads" \
+    --interleaved \
+    --reference "$reference" \
+    /dev/stdin \
+    2> "${sample_id}.bwameth.stderr.log" | \
+  samtools view -bh -q "$mapq" -L "$target_bed" -o "$target_bam" - \
+    2> "${sample_id}.samtools-view.stderr.log"
+  pipe_status=("${PIPESTATUS[@]}")
+  {
+    echo "stream_interleaved_fastq=${pipe_status[0]}"
+    echo "fastp=SKIPPED_ALREADY_CLEANED"
+    echo "bwameth=${pipe_status[1]}"
+    echo "samtools_view=${pipe_status[2]}"
+  } > "$status_file"
+else
+  python3 "${script_dir}/stream_interleaved_fastq.py" \
+    --r1-source "$r1_source" \
+    --r2-source "$r2_source" \
+    --r1-md5 "$r1_md5" \
+    --r2-md5 "$r2_md5" \
+    2> "${sample_id}.source-stream.log" | \
+  fastp \
+    --stdin \
+    --interleaved_in \
+    --stdout \
+    --json "${sample_id}.fastp.json" \
+    --html "${sample_id}.fastp.html" \
+    --thread "$fastp_threads" \
+    2> "${sample_id}.fastp.stderr.log" | \
+  bwameth.py \
+    --threads "$threads" \
+    --interleaved \
+    --reference "$reference" \
+    /dev/stdin \
+    2> "${sample_id}.bwameth.stderr.log" | \
+  samtools view -bh -q "$mapq" -L "$target_bed" -o "$target_bam" - \
+    2> "${sample_id}.samtools-view.stderr.log"
+  pipe_status=("${PIPESTATUS[@]}")
+  {
+    echo "stream_interleaved_fastq=${pipe_status[0]}"
+    echo "fastp=${pipe_status[1]}"
+    echo "bwameth=${pipe_status[2]}"
+    echo "samtools_view=${pipe_status[3]}"
+  } > "$status_file"
+fi
 set -e
-
-{
-  echo "stream_interleaved_fastq=${pipe_status[0]}"
-  echo "fastp=${pipe_status[1]}"
-  echo "bwameth=${pipe_status[2]}"
-  echo "samtools_view=${pipe_status[3]}"
-} > "$status_file"
 
 pipeline_failed=0
 for code in "${pipe_status[@]}"; do
