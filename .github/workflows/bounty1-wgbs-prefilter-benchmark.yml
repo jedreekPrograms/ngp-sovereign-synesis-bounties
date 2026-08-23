@@ -163,28 +163,24 @@ jobs:
           docker run --rm -v "$PWD/bench:/bench" bounty1-pace:prefilter-bench bash -lc '
             set -euo pipefail
             cd /bench/out
-            rm -f bsmap.names.txt bsmap.R1.names.txt bsmap.R2.names.txt
-            # Activate the BSMAP environment once before forking. Running two
-            # concurrent `micromamba run` commands races on libmamba's process
-            # lock and caused the previous benchmark to fail before alignment.
-            eval "$(micromamba shell hook --shell bash)"
-            micromamba activate bsmap
-            command -v bsmap >/dev/null
-            run_mate() {
-              mate="$1"
-              bsmap \
+            rm -f bsmap.names.txt bsmap.R1.names.txt bsmap.R2.names.txt bsmap.*.stderr.log bsmap.which.log
+            # Run the two mates sequentially through the dedicated BSMAP env.
+            # This avoids libmamba/environment races while preserving the
+            # permissive "either mate maps" union used by this recall test.
+            micromamba run -n bsmap which bsmap > bsmap.which.log 2>&1
+            for mate in R1 R2; do
+              : > "bsmap.${mate}.stderr.log"
+              micromamba run -n bsmap bsmap \
                 -a "/bench/raw/WT_rep1.clean.${mate}.fastq.gz" \
                 -d /bench/ref/pace-screen.fa \
                 -p 2 -3 -n 1 -s 12 -v 0.12 -g 3 -r 1 \
                 2> "bsmap.${mate}.stderr.log" | \
               samtools view -F 4 - | cut -f1 | sed -E "s#/([12])$##" | sort -u \
                 > "bsmap.${mate}.names.txt"
-            }
-            run_mate R1 & p1=$!
-            run_mate R2 & p2=$!
-            wait "$p1"
-            wait "$p2"
+              test -s "bsmap.${mate}.names.txt"
+            done
             sort -u bsmap.R1.names.txt bsmap.R2.names.txt > bsmap.names.txt
+            test -s bsmap.names.txt
           '
           end=$(date +%s)
           echo $((end-start)) > bench/out/bsmap.seconds.txt
@@ -217,5 +213,6 @@ jobs:
             bench/out/*.seconds.txt
             bench/out/*missed*.txt
             bench/out/*.stderr.log
+            bench/out/bsmap.which.log
           if-no-files-found: warn
           retention-days: 14
