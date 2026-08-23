@@ -63,15 +63,15 @@ python3 "${script_dir}/stream_interleaved_fastq.py" \
   --r2-source "$r2_source" \
   --r1-md5 "$r1_md5" \
   --r2-md5 "$r2_md5" \
-  2> "${sample_id}.source-stream.log" | \
+  2> "${sample_id}.pace-screen.source-stream.log" | \
 fastp \
   --stdin \
   --interleaved_in \
   --stdout \
-  --json "${sample_id}.fastp.json" \
-  --html "${sample_id}.fastp.html" \
+  --json "${sample_id}.pace-screen.fastp.json" \
+  --html "${sample_id}.pace-screen.fastp.html" \
   --thread "$fastp_threads" \
-  2> "${sample_id}.fastp.stderr.log" | \
+  2> "${sample_id}.pace-screen.fastp.stderr.log" | \
 bwameth.py \
   --threads "$threads" \
   --interleaved \
