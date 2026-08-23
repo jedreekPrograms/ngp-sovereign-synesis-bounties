@@ -2,9 +2,9 @@ name: Bounty 1 WGBS prefilter benchmark
 
 on:
   workflow_dispatch:
-  push:
+  pull_request:
     branches:
-      - bounty-1-real-pipeline
+      - main
     paths:
       - '.github/workflows/bounty1-wgbs-prefilter-benchmark.yml'
 
