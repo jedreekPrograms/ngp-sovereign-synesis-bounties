@@ -8,6 +8,7 @@ on:
       - '.github/workflows/bounty1-full-wgbs-benchmark.yml'
       - '.github/workflows/bounty1-full-chromatin-benchmark.yml'
       - '.github/workflows/bounty1-wgbs-cohort.yml'
+      - '.github/workflows/bounty1-wgbs-cohort-v2.yml'
 
 permissions:
   actions: write
@@ -65,3 +66,4 @@ jobs:
           clean_workflow bounty1-full-wgbs-benchmark.yml
           clean_workflow bounty1-full-chromatin-benchmark.yml
           clean_workflow bounty1-wgbs-cohort.yml
+          clean_workflow bounty1-wgbs-cohort-v2.yml
