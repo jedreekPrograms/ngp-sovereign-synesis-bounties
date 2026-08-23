@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Fast, conservative WGBS candidate screen for DunedinPACE loci.
+#
+# This is NOT the final alignment. The complete paired FASTQ source is first
+# validated against its published MD5 and passed once through fastp. Those
+# cleaned reads are aligned to a deliberately generous target-only bisulfite
+# reference (normally merged +/-10 kb windows around every DunedinPACE probe).
+# Any primary pair for which either mate maps to that screen reference is kept.
+# The resulting candidate FASTQs must subsequently be aligned against the full
+# hg19 reference; final MAPQ filtering, target restriction, duplicate removal,
+# and methylation calling therefore still use the complete genome reference.
+#
+# Usage:
+#   screen_wgbs_pace_candidates.sh SAMPLE R1 R2 R1_MD5 R2_MD5 \
+#       SCREEN_REFERENCE_FASTA THREADS
+
+if [[ $# -ne 7 ]]; then
+  echo "usage: $0 SAMPLE R1 R2 R1_MD5 R2_MD5 SCREEN_REF_FASTA THREADS" >&2
+  exit 2
+fi
+
+sample_id="$1"
+r1_source="$2"
+r2_source="$3"
+r1_md5="${4,,}"
+r2_md5="${5,,}"
+screen_reference="$6"
+threads="$7"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [[ -z "$r2_source" ]]; then
+  echo "PACE candidate screen requires paired-end WGBS" >&2
+  exit 2
+fi
+if [[ ! -s "$screen_reference" ]]; then
+  echo "screen reference FASTA not found or empty: $screen_reference" >&2
+  exit 2
+fi
+if ! [[ "$threads" =~ ^[0-9]+$ ]] || (( threads < 1 )); then
+  echo "THREADS must be a positive integer" >&2
+  exit 2
+fi
+
+fastp_threads="$threads"
+if (( fastp_threads > 2 )); then
+  fastp_threads=2
+fi
+
+screen_bam="${sample_id}.pace-screen.primary-any-mapped.bam"
+candidate_r1="${sample_id}.candidate.R1.fastq.gz"
+candidate_r2="${sample_id}.candidate.R2.fastq.gz"
+status_file="${sample_id}.pace-screen.pipeline-status.txt"
+
+# `flag.unmap && flag.munmap` is true only when both ends of the template are
+# unmapped. Negating it keeps the complete primary pair whenever either mate
+# maps to the generous screen reference. Secondary/supplementary records are
+# excluded before reconstructing FASTQ.
+set +e
+python3 "${script_dir}/stream_interleaved_fastq.py" \
+  --r1-source "$r1_source" \
+  --r2-source "$r2_source" \
+  --r1-md5 "$r1_md5" \
+  --r2-md5 "$r2_md5" \
+  2> "${sample_id}.source-stream.log" | \
+fastp \
+  --stdin \
+  --interleaved_in \
+  --stdout \
+  --json "${sample_id}.fastp.json" \
+  --html "${sample_id}.fastp.html" \
+  --thread "$fastp_threads" \
+  2> "${sample_id}.fastp.stderr.log" | \
+bwameth.py \
+  --threads "$threads" \
+  --interleaved \
+  --reference "$screen_reference" \
+  /dev/stdin \
+  2> "${sample_id}.pace-screen.bwameth.stderr.log" | \
+samtools view -bh \
+  -F SECONDARY,SUPPLEMENTARY \
+  -e '!(flag.unmap && flag.munmap)' \
+  -o "$screen_bam" - \
+  2> "${sample_id}.pace-screen.samtools-view.stderr.log"
+pipe_status=("${PIPESTATUS[@]}")
+set -e
+
+{
+  echo "stream_interleaved_fastq=${pipe_status[0]}"
+  echo "fastp=${pipe_status[1]}"
+  echo "bwameth_screen=${pipe_status[2]}"
+  echo "samtools_view=${pipe_status[3]}"
+} > "$status_file"
+
+for code in "${pipe_status[@]}"; do
+  if (( code != 0 )); then
+    cat "$status_file" >&2
+    echo "PACE candidate screen failed; inspect ${sample_id}.pace-screen.*.log" >&2
+    exit 1
+  fi
+done
+
+samtools quickcheck -v "$screen_bam"
+if [[ "$(samtools view -c "$screen_bam")" -eq 0 ]]; then
+  echo "PACE candidate screen retained zero primary alignments" >&2
+  exit 1
+fi
+
+# Name-collate before FASTQ reconstruction. `samtools fastq` restores reads to
+# FASTQ orientation, so the later full-hg19 alignment receives ordinary paired
+# reads rather than target-reference-oriented sequences.
+samtools collate -u -O -@ "$threads" "$screen_bam" | \
+samtools fastq \
+  -@ "$fastp_threads" \
+  -n \
+  -1 "$candidate_r1" \
+  -2 "$candidate_r2" \
+  -0 /dev/null \
+  -s /dev/null \
+  - 2> "${sample_id}.pace-screen.samtools-fastq.stderr.log"
+
+gzip -t "$candidate_r1"
+gzip -t "$candidate_r2"
+
+r1_lines=$(gzip -cd "$candidate_r1" | wc -l)
+r2_lines=$(gzip -cd "$candidate_r2" | wc -l)
+if (( r1_lines == 0 || r2_lines == 0 || r1_lines % 4 != 0 || r2_lines % 4 != 0 )); then
+  echo "candidate FASTQ record structure is invalid" >&2
+  exit 1
+fi
+if (( r1_lines != r2_lines )); then
+  echo "candidate R1/R2 record counts differ" >&2
+  exit 1
+fi
+
+echo $((r1_lines / 4)) > "${sample_id}.candidate-pair-count.txt"
+du -h "$candidate_r1" "$candidate_r2" > "${sample_id}.candidate-fastq-size.txt"
+
+rm -f "$screen_bam"
+printf '%s\n%s\n' "$candidate_r1" "$candidate_r2"
