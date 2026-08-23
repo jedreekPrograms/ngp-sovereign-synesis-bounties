@@ -142,7 +142,7 @@ jobs:
             for mate in R1 R2; do
               mkdir -p "bismark_${mate}"
               bismark --genome /bench/ref/bismark_genome \
-                --bowtie2 --non_directional -N 1 -L 15 --score_min L,0,-0.6 \
+                --bowtie2 --non_directional -n 1 -l 15 --score_min L,0,-0.6 \
                 -p 4 --bam --temp_dir "bismark_${mate}/tmp" --output_dir "bismark_${mate}" \
                 "/bench/raw/WT_rep1.clean.${mate}.fastq.gz"
               bam=$(find "bismark_${mate}" -maxdepth 1 -type f -name "*.bam" | head -1)
