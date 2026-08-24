@@ -2,7 +2,7 @@
 """Bounded-disk Abismal screening for an interleaved cleaned FASTQ stream.
 
 Abismal requires separate mate filenames. Feeding both mates through FIFOs can
- deadlock because the mapper is free to open/read its inputs sequentially while
+deadlock because the mapper is free to open/read its inputs sequentially while
 an interleaved producer must advance R1 and R2 together. This helper avoids
 that class of deadlock without materialising whole cleaned libraries: it writes
 one bounded pair of temporary FASTQ chunks, maps that chunk, emits complete
@@ -67,7 +67,15 @@ def write_chunk(stream, r1_path: Path, r2_path: Path, max_pairs: int) -> int:
     return count
 
 
-def mapped_primary_names(sam_path: Path) -> set[str]:
+def mapped_names(sam_path: Path) -> set[str]:
+    """Return pair names with any mapped Abismal record.
+
+    This intentionally matches the candidate semantics validated by the
+    full-hg19 truth benchmark: retain the complete pair when any Abismal SAM
+    record is mapped, including secondary/supplementary records. The screen is
+    conservative only; final alignment, primary filtering and MAPQ>=30 are
+    performed later against checksum-verified complete hg19.
+    """
     names: set[str] = set()
     with sam_path.open("r", encoding="utf-8") as sam:
         for line in sam:
@@ -77,7 +85,7 @@ def mapped_primary_names(sam_path: Path) -> set[str]:
             if len(fields) < 11:
                 raise RuntimeError("invalid Abismal SAM record")
             flag = int(fields[1])
-            if flag & 0x4 or flag & 0x100 or flag & 0x800:
+            if flag & 0x4:
                 continue
             names.add(canonical_sam_name(fields[0]))
     return names
@@ -178,7 +186,7 @@ def main() -> int:
                 if not sam_path.is_file() or sam_path.stat().st_size == 0:
                     raise RuntimeError("Abismal produced no SAM output")
 
-                keep = mapped_primary_names(sam_path)
+                keep = mapped_names(sam_path)
                 emitted = emit_candidates(
                     r1_chunk, r2_chunk, keep, r1_candidates, r2_candidates
                 )
