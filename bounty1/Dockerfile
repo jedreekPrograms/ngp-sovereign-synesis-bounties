@@ -36,6 +36,14 @@ RUN micromamba create -y -n bsmap -c conda-forge -c bioconda \
       bsmap=2.90 \
     && micromamba clean --all --yes
 
+# Abismal is a modern bisulfite mapper optimized for short WGBS reads. Keep it
+# isolated because its Bioconda build currently pins an older htslib than the
+# primary samtools 1.24 toolchain. It is benchmark-only until a fail-closed
+# full-hg19 truth-set test demonstrates 100% recall for PACE-supporting pairs.
+RUN micromamba create -y -n abismal -c conda-forge -c bioconda \
+      abismal=3.3.0 \
+    && micromamba clean --all --yes
+
 # MethylDackel 0.6.1 currently links against htslib <1.24, while the primary
 # workflow intentionally pins samtools/htslib 1.24. Keep the extractor in an
 # isolated environment rather than weakening the primary toolchain pin.
