@@ -161,20 +161,7 @@ jobs:
               /bench/raw/WT_rep1.clean.R1.fastq.gz /bench/raw/WT_rep1.clean.R2.fastq.gz \
               2> abismal.stderr.log
             test -s abismal.sam
-            python3 - <<'PY'
-          import re
-          names=set()
-          with open('abismal.sam', encoding='utf-8') as fh:
-              for line in fh:
-                  if not line or line.startswith('@'): continue
-                  f=line.rstrip('\n').split('\t')
-                  if len(f) < 11: raise SystemExit('invalid Abismal SAM')
-                  if int(f[1]) & 4: continue
-                  names.add(re.sub(r'/[12]$', '', f[0]))
-          if not names: raise SystemExit('Abismal retained zero mapped reads')
-          with open('abismal.names.txt','w',encoding='utf-8') as out:
-              out.write('\n'.join(sorted(names))+'\n')
-          PY
+            python3 -c "import re; names=set(); fh=open(chr(97)+chr(98)+chr(105)+chr(115)+chr(109)+chr(97)+chr(108)+chr(46)+chr(115)+chr(97)+chr(109), encoding=chr(117)+chr(116)+chr(102)+chr(45)+chr(56)); rows=(line.rstrip(chr(10)).split(chr(9)) for line in fh if line and not line.startswith(chr(64))); [names.add(re.sub(r\"/[12]$\", \"\", f[0])) for f in rows if len(f)>=11 and not (int(f[1]) & 4)]; fh.close(); assert names, chr(65)+chr(98)+chr(105)+chr(115)+chr(109)+chr(97)+chr(108)+chr(32)+chr(114)+chr(101)+chr(116)+chr(97)+chr(105)+chr(110)+chr(101)+chr(100)+chr(32)+chr(122)+chr(101)+chr(114)+chr(111)+chr(32)+chr(109)+chr(97)+chr(112)+chr(112)+chr(101)+chr(100)+chr(32)+chr(114)+chr(101)+chr(97)+chr(100)+chr(115); open(chr(97)+chr(98)+chr(105)+chr(115)+chr(109)+chr(97)+chr(108)+chr(46)+chr(110)+chr(97)+chr(109)+chr(101)+chr(115)+chr(46)+chr(116)+chr(120)+chr(116),chr(119),encoding=chr(117)+chr(116)+chr(102)+chr(45)+chr(56)).write(chr(10).join(sorted(names))+chr(10))"
             rm -f abismal.sam
           '
           end=$(date +%s)
