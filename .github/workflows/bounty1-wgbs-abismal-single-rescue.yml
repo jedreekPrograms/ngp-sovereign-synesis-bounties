@@ -116,15 +116,18 @@ jobs:
           docker run --rm -v "$PWD/bench:/bench" bounty1-pace:abismal-rescue bash -lc '
             set -euo pipefail
             cd /bench/out
-            /usr/bin/time -f "%e" -o paired.seconds.txt \
-              micromamba run -n abismal abismal map -i /bench/ref/pace-screen.abismal.idx -t 4 -a -m 0.20 \
+            start=$(date +%s)
+            micromamba run -n abismal abismal map -i /bench/ref/pace-screen.abismal.idx -t 4 -a -m 0.20 \
               -o paired.sam /bench/raw/WT_rep1.clean.R1.fastq.gz /bench/raw/WT_rep1.clean.R2.fastq.gz
-            /usr/bin/time -f "%e" -o r1.seconds.txt \
-              micromamba run -n abismal abismal map -i /bench/ref/pace-screen.abismal.idx -t 4 -a -m 0.20 \
+            echo $(($(date +%s)-start)) > paired.seconds.txt
+            start=$(date +%s)
+            micromamba run -n abismal abismal map -i /bench/ref/pace-screen.abismal.idx -t 4 -a -m 0.20 \
               -o r1.sam /bench/raw/WT_rep1.clean.R1.fastq.gz
-            /usr/bin/time -f "%e" -o r2.seconds.txt \
-              micromamba run -n abismal abismal map -i /bench/ref/pace-screen.abismal.idx -t 4 -a -m 0.20 \
+            echo $(($(date +%s)-start)) > r1.seconds.txt
+            start=$(date +%s)
+            micromamba run -n abismal abismal map -i /bench/ref/pace-screen.abismal.idx -t 4 -a -m 0.20 \
               -o r2.sam /bench/raw/WT_rep1.clean.R2.fastq.gz
+            echo $(($(date +%s)-start)) > r2.seconds.txt
           '
 
           python3 - <<'PY'
