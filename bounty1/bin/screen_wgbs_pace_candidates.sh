@@ -17,9 +17,12 @@ set -euo pipefail
 # production cohort, this script derives the validated +/-2 kb screen itself.
 # The passed SCREEN_REFERENCE_FASTA remains a standalone fallback.
 #
-# The cleaned FASTQ stream is split into named pipes because Abismal requires
-# separate mate filenames. Abismal SAM is also passed through a named pipe, so
-# neither whole cleaned FASTQs nor a whole screen SAM/BAM are materialised.
+# Abismal requires two mate filenames and can open/read them sequentially, so
+# paired FIFOs can deadlock with an interleaved producer. The cleaned fastp
+# stream is therefore processed in bounded temporary chunks: each chunk is
+# mapped, candidate pairs are appended to gzip outputs, and the chunk is
+# deleted before the next one. Whole cleaned libraries and whole-screen BAMs
+# are never materialised.
 #
 # Usage:
 #   screen_wgbs_pace_candidates.sh SAMPLE R1 R2 R1_MD5 R2_MD5 \
@@ -112,41 +115,12 @@ candidate_r1="${sample_id}.candidate.R1.fastq.gz"
 candidate_r2="${sample_id}.candidate.R2.fastq.gz"
 status_file="${sample_id}.pace-screen.pipeline-status.txt"
 workdir="$(mktemp -d "/tmp/${sample_id}.abismal-screen.XXXXXX")"
-r1_fifo="${workdir}/clean.R1.fastq"
-r2_fifo="${workdir}/clean.R2.fastq"
-sam_fifo="${workdir}/abismal.sam"
-mkfifo "$r1_fifo" "$r2_fifo" "$sam_fifo"
 cleanup() {
   rm -rf "$workdir"
 }
 trap cleanup EXIT
 
-# Consume the SAM FIFO before starting Abismal, then start Abismal before the
-# FASTQ splitter. This ordering prevents named-pipe open deadlocks.
 set +e
-(
-  samtools view -h -F SECONDARY,SUPPLEMENTARY \
-    -e '!(flag.unmap && flag.munmap)' "$sam_fifo" \
-    2> "${sample_id}.pace-screen.samtools-view.stderr.log" | \
-  samtools collate -u -O -@ "$threads" - \
-    2> "${sample_id}.pace-screen.samtools-collate.stderr.log" | \
-  samtools fastq \
-    -@ "$fastp_threads" -n \
-    -1 "$candidate_r1" -2 "$candidate_r2" \
-    -0 /dev/null -s /dev/null - \
-    2> "${sample_id}.pace-screen.samtools-fastq.stderr.log"
-) &
-extract_pid=$!
-
-(
-  micromamba run -n abismal abismal map \
-    -i "$screen_index" -t "$threads" -a -m 0.20 \
-    -s "${sample_id}.pace-screen.abismal.stats.yaml" \
-    -o "$sam_fifo" "$r1_fifo" "$r2_fifo" \
-    2> "${sample_id}.pace-screen.abismal.stderr.log"
-) &
-abismal_pid=$!
-
 python3 "${script_dir}/stream_interleaved_fastq.py" \
   --r1-source "$r1_source" --r2-source "$r2_source" \
   --r1-md5 "$r1_md5" --r2-md5 "$r2_md5" \
@@ -157,24 +131,25 @@ fastp \
   --html "${sample_id}.pace-screen.fastp.html" \
   --thread "$fastp_threads" \
   2> "${sample_id}.pace-screen.fastp.stderr.log" | \
-python3 "${script_dir}/split_interleaved_fastq.py" \
-  --r1-output "$r1_fifo" --r2-output "$r2_fifo" \
-  2> "${sample_id}.pace-screen.split.stderr.log"
+python3 "${script_dir}/chunked_abismal_screen.py" \
+  --index "$screen_index" \
+  --threads "$threads" \
+  --candidate-r1 "$candidate_r1" \
+  --candidate-r2 "$candidate_r2" \
+  --workdir "$workdir" \
+  --chunk-pairs 1000000 \
+  --max-edit-distance 0.20 \
+  2> "${sample_id}.pace-screen.abismal.stderr.log"
 feed_status=("${PIPESTATUS[@]}")
-
-wait "$abismal_pid"; abismal_status=$?
-wait "$extract_pid"; extract_status=$?
 set -e
 
 {
   echo "stream_interleaved_fastq=${feed_status[0]}"
   echo "fastp=${feed_status[1]}"
-  echo "split_interleaved_fastq=${feed_status[2]}"
-  echo "abismal_screen=${abismal_status}"
-  echo "samtools_extract_pipeline=${extract_status}"
+  echo "chunked_abismal_screen=${feed_status[2]}"
 } > "$status_file"
 
-for code in "${feed_status[@]}" "$abismal_status" "$extract_status"; do
+for code in "${feed_status[@]}"; do
   if (( code != 0 )); then
     cat "$status_file" >&2
     echo "PACE candidate screen failed; inspect ${sample_id}.pace-screen.*.log" >&2
