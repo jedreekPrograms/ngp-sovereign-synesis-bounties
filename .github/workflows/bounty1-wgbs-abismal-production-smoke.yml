@@ -6,6 +6,12 @@ on:
       - 'bounty1/bin/screen_wgbs_pace_candidates.sh'
       - 'bounty1/bin/split_interleaved_fastq.py'
       - '.github/workflows/bounty1-wgbs-abismal-production-smoke.yml'
+  push:
+    branches:
+      - bounty-1-real-pipeline
+    paths:
+      - 'bounty1/abismal-production-smoke.trigger'
+      - '.github/workflows/bounty1-wgbs-abismal-production-smoke.yml'
   workflow_dispatch:
 
 permissions:
