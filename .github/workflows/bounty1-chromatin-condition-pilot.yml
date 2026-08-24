@@ -1,4 +1,5 @@
 name: Bounty 1 full-genome chromatin condition pilot
+# Safe push-trigger for a single WT condition pilot while WGBS shards are CPU-bound.
 
 on:
   push:
@@ -146,10 +147,6 @@ jobs:
                 start=$(date +%s)
                 echo "[$(date -Is)] START ${sample}" | tee -a /chromatin/qc/timeline.log
 
-                # Exact compressed source bytes are streamed through the existing helper,
-                # which validates both published MD5 values before the pipeline can pass.
-                # fastp emits interleaved paired reads to stdout, avoiding 5-13 GiB trimmed
-                # FASTQ staging on the GitHub runner.
                 python3 /work/bin/stream_interleaved_fastq.py \
                   --r1-source "$r1" --r2-source "$r2" \
                   --r1-md5 "$md5_1" --r2-md5 "$md5_2" | \
