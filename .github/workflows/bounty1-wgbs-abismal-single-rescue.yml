@@ -1,0 +1,188 @@
+name: Bounty 1 WGBS Abismal single-end rescue
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/bounty1-wgbs-abismal-single-rescue.yml'
+      - 'bounty1/Dockerfile'
+
+permissions:
+  contents: read
+
+jobs:
+  rescue:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Load pinned analysis image from shared cache
+        uses: docker/build-push-action@v6
+        with:
+          context: bounty1
+          load: true
+          pull: true
+          tags: bounty1-pace:abismal-rescue
+          cache-from: type=gha,scope=bounty1-docker
+          cache-to: type=gha,mode=max,scope=bounty1-docker
+
+      - name: Prepare identical 100k WT benchmark slice and PACE screen
+        run: |
+          set -euo pipefail
+          mkdir -p bench/ref bench/raw bench/out
+          python3 - <<'PY'
+          import gzip
+          import urllib.request
+          from pathlib import Path
+
+          urls = {
+              'R1': 'https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202754/HRR1202754_f1.fq.gz',
+              'R2': 'https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202754/HRR1202754_r2.fq.gz',
+          }
+          n = 100_000
+          for mate, url in urls.items():
+              out = Path(f'bench/raw/WT_rep1.{mate}.fastq.gz')
+              req = urllib.request.Request(url, headers={'User-Agent': 'bounty1-abismal-single-rescue/1'})
+              with urllib.request.urlopen(req, timeout=60) as resp, gzip.GzipFile(fileobj=resp) as src, gzip.open(out, 'wb', compresslevel=1) as dst:
+                  for _ in range(n):
+                      rec = [src.readline() for _ in range(4)]
+                      if any(not x for x in rec):
+                          raise SystemExit(f'{mate}: source ended before {n} records')
+                      dst.writelines(rec)
+          PY
+          gzip -t bench/raw/WT_rep1.R1.fastq.gz
+          gzip -t bench/raw/WT_rep1.R2.fastq.gz
+
+          curl -fsSL --retry 10 --retry-delay 5 --retry-all-errors \
+            -o bench/ref/hg19.fa.gz https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz
+          curl -fsSL --retry 10 --retry-delay 5 --retry-all-errors \
+            -o bench/ref/md5sum.txt https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/md5sum.txt
+          (
+            cd bench/ref
+            grep -E '[[:space:]]hg19.fa.gz$' md5sum.txt > hg19.fa.gz.md5
+            md5sum --check hg19.fa.gz.md5
+            gzip -d hg19.fa.gz
+          )
+
+          docker run --rm -v "$PWD/bench:/bench" bounty1-pace:abismal-rescue bash -lc '
+            set -euo pipefail
+            samtools faidx /bench/ref/hg19.fa
+            Rscript /work/bin/export_pace_regions.R --output /bench/ref/pace.bed --flank 500
+          '
+
+          python3 - <<'PY'
+          from collections import defaultdict
+          from pathlib import Path
+
+          src = Path('bench/ref/pace.bed')
+          dst = Path('bench/ref/pace-screen.merged.bed')
+          by = defaultdict(list)
+          for line in src.read_text().splitlines():
+              if not line or line.startswith('#'):
+                  continue
+              f = line.split('\t')
+              by[f[0]].append((max(0, int(f[1]) - 500), int(f[2]) + 500))
+          with dst.open('w') as out:
+              for chrom in sorted(by):
+                  merged = []
+                  for start, end in sorted(by[chrom]):
+                      if not merged or start > merged[-1][1]:
+                          merged.append([start, end])
+                      else:
+                          merged[-1][1] = max(merged[-1][1], end)
+                  for start, end in merged:
+                      out.write(f'{chrom}\t{start}\t{end}\n')
+          PY
+
+          docker run --rm -v "$PWD/bench:/bench" bounty1-pace:abismal-rescue bash -lc '
+            set -euo pipefail
+            : > /bench/ref/pace-screen.fa
+            while read -r chrom start end; do
+              samtools faidx /bench/ref/hg19.fa "${chrom}:$((start+1))-${end}"
+            done < /bench/ref/pace-screen.merged.bed >> /bench/ref/pace-screen.fa
+            test -s /bench/ref/pace-screen.fa
+            micromamba run -n abismal abismal idx -t 4 /bench/ref/pace-screen.fa /bench/ref/pace-screen.abismal.idx
+            fastp -i /bench/raw/WT_rep1.R1.fastq.gz -I /bench/raw/WT_rep1.R2.fastq.gz \
+              -o /bench/raw/WT_rep1.clean.R1.fastq.gz -O /bench/raw/WT_rep1.clean.R2.fastq.gz \
+              --thread 2 --json /bench/out/fastp.json --html /bench/out/fastp.html
+          '
+
+      - name: Run paired plus independent single-end rescue
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/bench:/bench" bounty1-pace:abismal-rescue bash -lc '
+            set -euo pipefail
+            cd /bench/out
+            /usr/bin/time -f "%e" -o paired.seconds.txt \
+              micromamba run -n abismal abismal map -i /bench/ref/pace-screen.abismal.idx -t 4 -a -m 0.20 \
+              -o paired.sam /bench/raw/WT_rep1.clean.R1.fastq.gz /bench/raw/WT_rep1.clean.R2.fastq.gz
+            /usr/bin/time -f "%e" -o r1.seconds.txt \
+              micromamba run -n abismal abismal map -i /bench/ref/pace-screen.abismal.idx -t 4 -a -m 0.20 \
+              -o r1.sam /bench/raw/WT_rep1.clean.R1.fastq.gz
+            /usr/bin/time -f "%e" -o r2.seconds.txt \
+              micromamba run -n abismal abismal map -i /bench/ref/pace-screen.abismal.idx -t 4 -a -m 0.20 \
+              -o r2.sam /bench/raw/WT_rep1.clean.R2.fastq.gz
+          '
+
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          all_names = set()
+          counts = {}
+          for stem in ('paired', 'r1', 'r2'):
+              names = set()
+              with Path(f'bench/out/{stem}.sam').open(encoding='utf-8') as fh:
+                  for line in fh:
+                      if not line or line.startswith('@'):
+                          continue
+                      fields = line.rstrip('\n').split('\t')
+                      if len(fields) < 11:
+                          raise SystemExit(f'invalid SAM row in {stem}')
+                      if int(fields[1]) & 4:
+                          continue
+                      names.add(re.sub(r'/[12]$', '', fields[0]))
+              counts[stem] = len(names)
+              all_names.update(names)
+              Path(f'bench/out/{stem}.sam').unlink()
+
+          missed_truth = {
+              'A00881:537:HVMTJDSXY:1:1101:16595:6464',
+              'A00881:537:HVMTJDSXY:1:1101:32407:7639',
+          }
+          still_missing = sorted(missed_truth - all_names)
+          Path('bench/out/still-missing.txt').write_text(
+              '\n'.join(still_missing) + ('\n' if still_missing else ''), encoding='utf-8'
+          )
+          Path('bench/out/summary.txt').write_text(
+              '\n'.join([
+                  'provenance_truth_run=32723345053',
+                  'provenance_truth_count=603',
+                  'provenance_m20_missed=2',
+                  f'paired_candidates={counts["paired"]}',
+                  f'r1_single_candidates={counts["r1"]}',
+                  f'r2_single_candidates={counts["r2"]}',
+                  f'union_candidates={len(all_names)}',
+                  f'rescued_of_2={2-len(still_missing)}',
+                  f'still_missing={len(still_missing)}',
+              ]) + '\n', encoding='utf-8'
+          )
+          print(Path('bench/out/summary.txt').read_text(), end='')
+          if still_missing:
+              raise SystemExit('single-end rescue did not recover both known truth misses')
+          PY
+
+      - name: Upload rescue evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounty1-wgbs-abismal-single-rescue
+          path: |
+            bench/out/summary.txt
+            bench/out/still-missing.txt
+            bench/out/*.seconds.txt
+          if-no-files-found: warn
+          retention-days: 14
