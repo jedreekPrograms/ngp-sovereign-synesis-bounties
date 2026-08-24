@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'bounty1/bin/screen_wgbs_pace_candidates.sh'
+      - 'bounty1/bin/chunked_abismal_screen.py'
       - 'bounty1/bin/split_interleaved_fastq.py'
       - '.github/workflows/bounty1-wgbs-abismal-production-smoke.yml'
   push:
@@ -125,8 +126,9 @@ jobs:
           # Allow a tiny implementation tolerance but fail loudly on semantic drift.
           test "$pairs" -ge 22000
           test "$pairs" -le 23100
-          grep -q '^abismal_screen=0$' shard/out/WT_smoke.pace-screen.pipeline-status.txt
-          grep -q '^samtools_extract_pipeline=0$' shard/out/WT_smoke.pace-screen.pipeline-status.txt
+          grep -q '^stream_interleaved_fastq=0$' shard/out/WT_smoke.pace-screen.pipeline-status.txt
+          grep -q '^fastp=0$' shard/out/WT_smoke.pace-screen.pipeline-status.txt
+          grep -q '^chunked_abismal_screen=0$' shard/out/WT_smoke.pace-screen.pipeline-status.txt
 
       - name: Upload integration evidence
         if: always()
