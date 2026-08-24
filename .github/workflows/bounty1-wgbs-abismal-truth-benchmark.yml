@@ -151,7 +151,7 @@ jobs:
       - name: Benchmark permissive Abismal rescue screens
         run: |
           set -euo pipefail
-          for spec in 'ambig|-a' 'm15|-a -m 0.15' 'm20|-a -m 0.20'; do
+          for spec in 'ambig|-a' 'm15|-a -m 0.15' 'm20|-a -m 0.20' 'm25|-a -m 0.25' 'm30|-a -m 0.30'; do
             name=${spec%%|*}
             flags=${spec#*|}
             start=$(date +%s)
@@ -173,7 +173,7 @@ jobs:
           import re
           from pathlib import Path
 
-          for name in ('ambig', 'm15', 'm20'):
+          for name in ('ambig', 'm15', 'm20', 'm25', 'm30'):
               sam = Path(f'bench/out/abismal-{name}.sam')
               names = set()
               with sam.open(encoding='utf-8') as fh:
@@ -198,7 +198,7 @@ jobs:
         run: |
           set -euo pipefail
           comm -23 bench/out/truth.names.txt bench/out/bwameth-screen.names.txt > bench/out/truth-missed-by-bwameth-screen.txt
-          for name in ambig m15 m20; do
+          for name in ambig m15 m20 m25 m30; do
             comm -23 bench/out/truth.names.txt "bench/out/abismal-${name}.names.txt" > "bench/out/truth-missed-by-abismal-${name}.txt"
           done
 
@@ -208,19 +208,25 @@ jobs:
           ambig=$(wc -l < bench/out/abismal-ambig.names.txt)
           m15=$(wc -l < bench/out/abismal-m15.names.txt)
           m20=$(wc -l < bench/out/abismal-m20.names.txt)
+          m25=$(wc -l < bench/out/abismal-m25.names.txt)
+          m30=$(wc -l < bench/out/abismal-m30.names.txt)
           ambigmiss=$(wc -l < bench/out/truth-missed-by-abismal-ambig.txt)
           m15miss=$(wc -l < bench/out/truth-missed-by-abismal-m15.txt)
           m20miss=$(wc -l < bench/out/truth-missed-by-abismal-m20.txt)
+          m25miss=$(wc -l < bench/out/truth-missed-by-abismal-m25.txt)
+          m30miss=$(wc -l < bench/out/truth-missed-by-abismal-m30.txt)
 
-          printf 'reads_per_mate=100000\nfull_hg19_mapq30_pace_truth=%s\nbwameth_screen_candidates=%s\ntruth_missed_by_bwameth_screen=%s\nbwameth_screen_seconds=%s\nabismal_ambig_candidates=%s\ntruth_missed_by_abismal_ambig=%s\nabismal_ambig_seconds=%s\nabismal_m15_candidates=%s\ntruth_missed_by_abismal_m15=%s\nabismal_m15_seconds=%s\nabismal_m20_candidates=%s\ntruth_missed_by_abismal_m20=%s\nabismal_m20_seconds=%s\ntruth_seconds=%s\n' \
+          printf 'reads_per_mate=100000\nfull_hg19_mapq30_pace_truth=%s\nbwameth_screen_candidates=%s\ntruth_missed_by_bwameth_screen=%s\nbwameth_screen_seconds=%s\nabismal_ambig_candidates=%s\ntruth_missed_by_abismal_ambig=%s\nabismal_ambig_seconds=%s\nabismal_m15_candidates=%s\ntruth_missed_by_abismal_m15=%s\nabismal_m15_seconds=%s\nabismal_m20_candidates=%s\ntruth_missed_by_abismal_m20=%s\nabismal_m20_seconds=%s\nabismal_m25_candidates=%s\ntruth_missed_by_abismal_m25=%s\nabismal_m25_seconds=%s\nabismal_m30_candidates=%s\ntruth_missed_by_abismal_m30=%s\nabismal_m30_seconds=%s\ntruth_seconds=%s\n' \
             "$truth" "$bw" "$bwmiss" "$(cat bench/out/bwameth-screen.seconds.txt)" \
             "$ambig" "$ambigmiss" "$(cat bench/out/abismal-ambig.seconds.txt)" \
             "$m15" "$m15miss" "$(cat bench/out/abismal-m15.seconds.txt)" \
             "$m20" "$m20miss" "$(cat bench/out/abismal-m20.seconds.txt)" \
+            "$m25" "$m25miss" "$(cat bench/out/abismal-m25.seconds.txt)" \
+            "$m30" "$m30miss" "$(cat bench/out/abismal-m30.seconds.txt)" \
             "$(cat bench/out/truth.seconds.txt)" | tee bench/out/summary.txt
 
           test "$bwmiss" -eq 0
-          test "$m20miss" -eq 0
+          test "$m30miss" -eq 0
 
       - name: Upload benchmark evidence
         if: always()
