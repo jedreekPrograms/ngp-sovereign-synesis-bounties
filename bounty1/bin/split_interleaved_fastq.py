@@ -10,7 +10,9 @@ output without materialising cleaned whole-library FASTQs on disk.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import threading
 from pathlib import Path
 
 
@@ -33,6 +35,43 @@ def read_record(stream) -> list[bytes] | None:
     return record
 
 
+def open_paired_outputs(r1_path: str, r2_path: str):
+    """Open both FIFO writers concurrently to avoid paired-reader deadlocks.
+
+    Some mappers open R1 for reading and then block while opening R2. If this
+    process opens R1 for writing first and starts filling it before opening R2,
+    both sides can deadlock once the R1 pipe buffer fills. Opening the two write
+    ends concurrently lets both FIFO handshakes complete before any reads are
+    streamed. Regular files also work with the same code path.
+    """
+
+    paths = [r1_path, r2_path]
+    fds: list[int | None] = [None, None]
+    errors: list[BaseException] = []
+
+    def opener(index: int) -> None:
+        try:
+            fds[index] = os.open(paths[index], os.O_WRONLY | os.O_CREAT, 0o666)
+        except BaseException as exc:  # propagated in the main thread below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=opener, args=(i,), daemon=True) for i in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    if errors:
+        for fd in fds:
+            if fd is not None:
+                os.close(fd)
+        raise errors[0]
+    if any(fd is None for fd in fds):
+        raise RuntimeError("failed to open paired FASTQ outputs")
+
+    return os.fdopen(fds[0], "wb", buffering=0), os.fdopen(fds[1], "wb", buffering=0)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--r1-output", required=True)
@@ -40,10 +79,8 @@ def main() -> int:
     args = parser.parse_args()
 
     count = 0
-    # Open in this order consistently with the mapper invocation (R1, then R2).
-    with Path(args.r1_output).open("wb", buffering=0) as r1_out, Path(
-        args.r2_output
-    ).open("wb", buffering=0) as r2_out:
+    r1_out, r2_out = open_paired_outputs(args.r1_output, args.r2_output)
+    with r1_out, r2_out:
         while True:
             r1 = read_record(sys.stdin.buffer)
             if r1 is None:
