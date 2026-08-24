@@ -102,18 +102,20 @@ PY
   screen_reference="$narrow_reference"
 fi
 
-# Keep the large transient screen BAM outside /shard so a timeout/cancellation
-# cannot accidentally upload gigabytes of a partial BAM as diagnostic evidence.
-screen_bam="/tmp/${sample_id}.pace-screen.primary-any-mapped.bam"
 candidate_r1="${sample_id}.candidate.R1.fastq.gz"
 candidate_r2="${sample_id}.candidate.R2.fastq.gz"
 status_file="${sample_id}.pace-screen.pipeline-status.txt"
-trap 'rm -f "$screen_bam"' EXIT INT TERM
 
 # `flag.unmap && flag.munmap` is true only when both ends of the template are
 # unmapped. Negating it keeps the complete primary pair whenever either mate
 # maps to the generous screen reference. Secondary/supplementary records are
 # excluded before reconstructing FASTQ.
+#
+# Keep this fully streaming. Earlier versions materialized a large transient
+# screen BAM before name-collation. On full HRA003336 libraries that BAM could
+# consume the GitHub-hosted runner disk while the checksum-verified source FASTQs
+# and hg19 indexes were still present. Streaming view -> collate -> fastq keeps
+# identical pair-selection semantics without that extra whole-dataset copy.
 set +e
 python3 "${script_dir}/stream_interleaved_fastq.py" \
   --r1-source "$r1_source" \
@@ -138,8 +140,17 @@ bwameth.py \
 samtools view -bh \
   -F SECONDARY,SUPPLEMENTARY \
   -e '!(flag.unmap && flag.munmap)' \
-  -o "$screen_bam" - \
-  2> "${sample_id}.pace-screen.samtools-view.stderr.log"
+  - 2> "${sample_id}.pace-screen.samtools-view.stderr.log" | \
+samtools collate -u -O -@ "$threads" - \
+  2> "${sample_id}.pace-screen.samtools-collate.stderr.log" | \
+samtools fastq \
+  -@ "$fastp_threads" \
+  -n \
+  -1 "$candidate_r1" \
+  -2 "$candidate_r2" \
+  -0 /dev/null \
+  -s /dev/null \
+  - 2> "${sample_id}.pace-screen.samtools-fastq.stderr.log"
 pipe_status=("${PIPESTATUS[@]}")
 set -e
 
@@ -148,6 +159,8 @@ set -e
   echo "fastp=${pipe_status[1]}"
   echo "bwameth_screen=${pipe_status[2]}"
   echo "samtools_view=${pipe_status[3]}"
+  echo "samtools_collate=${pipe_status[4]}"
+  echo "samtools_fastq=${pipe_status[5]}"
 } > "$status_file"
 
 for code in "${pipe_status[@]}"; do
@@ -157,25 +170,6 @@ for code in "${pipe_status[@]}"; do
     exit 1
   fi
 done
-
-samtools quickcheck -v "$screen_bam"
-if [[ "$(samtools view -c "$screen_bam")" -eq 0 ]]; then
-  echo "PACE candidate screen retained zero primary alignments" >&2
-  exit 1
-fi
-
-# Name-collate before FASTQ reconstruction. `samtools fastq` restores reads to
-# FASTQ orientation, so the later full-hg19 alignment receives ordinary paired
-# reads rather than target-reference-oriented sequences.
-samtools collate -u -O -@ "$threads" "$screen_bam" | \
-samtools fastq \
-  -@ "$fastp_threads" \
-  -n \
-  -1 "$candidate_r1" \
-  -2 "$candidate_r2" \
-  -0 /dev/null \
-  -s /dev/null \
-  - 2> "${sample_id}.pace-screen.samtools-fastq.stderr.log"
 
 gzip -t "$candidate_r1"
 gzip -t "$candidate_r2"
@@ -194,5 +188,4 @@ fi
 echo $((r1_lines / 4)) > "${sample_id}.candidate-pair-count.txt"
 du -h "$candidate_r1" "$candidate_r2" > "${sample_id}.candidate-fastq-size.txt"
 
-rm -f "$screen_bam"
 printf '%s\n%s\n' "$candidate_r1" "$candidate_r2"
