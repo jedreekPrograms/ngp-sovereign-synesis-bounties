@@ -2,6 +2,12 @@ name: Bounty 1 WGBS Abismal context benchmark
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - bounty-1-real-pipeline
+    paths:
+      - '.github/workflows/bounty1-wgbs-abismal-context-benchmark.yml'
+      - 'bounty1/Dockerfile'
   pull_request:
     branches:
       - main
