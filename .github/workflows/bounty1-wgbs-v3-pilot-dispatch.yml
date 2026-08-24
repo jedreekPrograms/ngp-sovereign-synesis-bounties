@@ -1,0 +1,27 @@
+name: Bounty 1 WGBS v3 pilot dispatcher
+
+on:
+  push:
+    branches:
+      - bounty-1-real-pipeline
+    paths:
+      - 'bounty1/wgbs-v3-pilot.trigger'
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch one-sample checkpointed WGBS v3 pilot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh workflow run bounty1-wgbs-cohort-v3.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref bounty-1-real-pipeline \
+            -f sample_regex='^WT_rep1_WGBS$' \
+            -f max_parallel='1'
