@@ -56,8 +56,9 @@ RUN set -eu; \
       micromamba env remove -y -n methyldackel >/dev/null 2>&1 || true; \
       if micromamba create -y -n methyldackel -c conda-forge -c bioconda methyldackel=0.6.1; then \
         break; \
+      else \
+        rc=$?; \
       fi; \
-      rc=$?; \
       if [ "$attempt" -eq 3 ]; then exit "$rc"; fi; \
       sleep $((attempt * 5)); \
     done; \
