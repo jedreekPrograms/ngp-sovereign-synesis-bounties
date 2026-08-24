@@ -1,11 +1,11 @@
 name: Bounty 1 WGBS v3 pilot dispatcher
 
 on:
-  push:
+  pull_request:
     branches:
-      - bounty-1-real-pipeline
+      - main
     paths:
-      - 'bounty1/wgbs-v3-pilot.trigger'
+      - 'bounty1/wgbs-v3-pilot*.trigger'
 
 permissions:
   contents: read
@@ -13,6 +13,7 @@ permissions:
 
 jobs:
   dispatch:
+    if: github.head_ref == 'bounty-1-real-pipeline'
     runs-on: ubuntu-latest
     steps:
       - name: Dispatch one-sample checkpointed WGBS v3 pilot
