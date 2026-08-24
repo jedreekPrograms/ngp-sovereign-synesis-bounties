@@ -47,9 +47,21 @@ RUN micromamba create -y -n abismal -c conda-forge -c bioconda \
 # MethylDackel 0.6.1 currently links against htslib <1.24, while the primary
 # workflow intentionally pins samtools/htslib 1.24. Keep the extractor in an
 # isolated environment rather than weakening the primary toolchain pin.
-RUN micromamba create -y -n methyldackel -c conda-forge -c bioconda \
-      methyldackel=0.6.1 \
-    && micromamba clean --all --yes
+# GitHub-hosted BuildKit has occasionally produced a transient micromamba
+# netlink abort while materializing this environment. Retry only this immutable
+# pinned solve, removing any partial prefix between attempts; fail closed after
+# three attempts so a broken environment can never enter the analysis image.
+RUN set -eu; \
+    for attempt in 1 2 3; do \
+      micromamba env remove -y -n methyldackel >/dev/null 2>&1 || true; \
+      if micromamba create -y -n methyldackel -c conda-forge -c bioconda methyldackel=0.6.1; then \
+        break; \
+      fi; \
+      rc=$?; \
+      if [ "$attempt" -eq 3 ]; then exit "$rc"; fi; \
+      sleep $((attempt * 5)); \
+    done; \
+    micromamba clean --all --yes
 
 # Pin the upstream research implementation for reproducibility. Docker build
 # RUN steps do not execute through micromamba's runtime entrypoint, therefore
