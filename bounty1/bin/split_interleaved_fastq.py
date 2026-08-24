@@ -13,7 +13,6 @@ import argparse
 import os
 import sys
 import threading
-from pathlib import Path
 
 
 def canonical_name(header: bytes) -> bytes:
