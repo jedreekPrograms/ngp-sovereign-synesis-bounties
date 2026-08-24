@@ -13,6 +13,10 @@ set -euo pipefail
 # ~12 s and retaining 22,545 candidate pairs. Wider 5/10 kb variants also had
 # zero misses; +/-2 kb is therefore the smallest validated context.
 #
+# When complete hg19 + official PACE +/-500 bp windows are mounted by the
+# production cohort, this script derives the validated +/-2 kb screen itself.
+# The passed SCREEN_REFERENCE_FASTA remains a standalone fallback.
+#
 # The cleaned FASTQ stream is split into named pipes because Abismal requires
 # separate mate filenames. Abismal SAM is also passed through a named pipe, so
 # neither whole cleaned FASTQs nor a whole screen SAM/BAM are materialised.
@@ -51,6 +55,50 @@ fi
 fastp_threads="$threads"
 if (( fastp_threads > 2 )); then
   fastp_threads=2
+fi
+
+# Production v3 currently prepares a legacy fallback screen before invoking
+# this helper. Derive the benchmark-validated context here from complete hg19
+# so deployment cannot silently regress to the older +/-1 kb behavior.
+if [[ -s /shard/ref/hg19.fa && -s /shard/ref/pace.bed ]]; then
+  ctx_bed="/tmp/${sample_id}.pace-screen-2k.merged.bed"
+  ctx_fasta="/tmp/${sample_id}.pace-screen-2k.fa"
+  python3 - /shard/ref/pace.bed "$ctx_bed" <<'PY'
+from collections import defaultdict
+from pathlib import Path
+import sys
+
+src = Path(sys.argv[1])
+dst = Path(sys.argv[2])
+# pace.bed already carries +/-500 bp; add 1500 bp to obtain +/-2000 total.
+extra = 1500
+by_chrom = defaultdict(list)
+for line in src.read_text(encoding="utf-8").splitlines():
+    if not line or line.startswith("#"):
+        continue
+    fields = line.split("\t")
+    chrom = fields[0]
+    start = max(0, int(fields[1]) - extra)
+    end = int(fields[2]) + extra
+    by_chrom[chrom].append((start, end))
+
+with dst.open("w", encoding="utf-8") as out:
+    for chrom in sorted(by_chrom):
+        merged = []
+        for start, end in sorted(by_chrom[chrom]):
+            if not merged or start > merged[-1][1]:
+                merged.append([start, end])
+            else:
+                merged[-1][1] = max(merged[-1][1], end)
+        for start, end in merged:
+            out.write(f"{chrom}\t{start}\t{end}\n")
+PY
+  : > "$ctx_fasta"
+  while read -r chrom start end; do
+    samtools faidx /shard/ref/hg19.fa "${chrom}:$((start + 1))-${end}"
+  done < "$ctx_bed" >> "$ctx_fasta"
+  test -s "$ctx_fasta"
+  screen_reference="$ctx_fasta"
 fi
 
 screen_index="${screen_reference}.abismal.idx"
