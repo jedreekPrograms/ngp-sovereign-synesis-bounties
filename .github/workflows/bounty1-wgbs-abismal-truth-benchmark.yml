@@ -148,40 +148,79 @@ jobs:
           end=$(date +%s)
           echo $((end-start)) > bench/out/bwameth-screen.seconds.txt
 
-      - name: Benchmark Abismal paired PACE screen
+      - name: Benchmark permissive Abismal rescue screens
         run: |
           set -euo pipefail
-          start=$(date +%s)
-          docker run --rm -v "$PWD/bench:/bench" bounty1-pace:abismal-truth-bench bash -lc '
-            set -euo pipefail
-            cd /bench/out
-            micromamba run -n abismal abismal map \
-              -i /bench/ref/pace-screen.abismal.idx -t 4 \
-              -s abismal.stats.yaml -o abismal.sam \
-              /bench/raw/WT_rep1.clean.R1.fastq.gz /bench/raw/WT_rep1.clean.R2.fastq.gz \
-              2> abismal.stderr.log
-            test -s abismal.sam
-            python3 -c "import re; names=set(); fh=open(chr(97)+chr(98)+chr(105)+chr(115)+chr(109)+chr(97)+chr(108)+chr(46)+chr(115)+chr(97)+chr(109), encoding=chr(117)+chr(116)+chr(102)+chr(45)+chr(56)); rows=(line.rstrip(chr(10)).split(chr(9)) for line in fh if line and not line.startswith(chr(64))); [names.add(re.sub(r\"/[12]$\", \"\", f[0])) for f in rows if len(f)>=11 and not (int(f[1]) & 4)]; fh.close(); assert names, chr(65)+chr(98)+chr(105)+chr(115)+chr(109)+chr(97)+chr(108)+chr(32)+chr(114)+chr(101)+chr(116)+chr(97)+chr(105)+chr(110)+chr(101)+chr(100)+chr(32)+chr(122)+chr(101)+chr(114)+chr(111)+chr(32)+chr(109)+chr(97)+chr(112)+chr(112)+chr(101)+chr(100)+chr(32)+chr(114)+chr(101)+chr(97)+chr(100)+chr(115); open(chr(97)+chr(98)+chr(105)+chr(115)+chr(109)+chr(97)+chr(108)+chr(46)+chr(110)+chr(97)+chr(109)+chr(101)+chr(115)+chr(46)+chr(116)+chr(120)+chr(116),chr(119),encoding=chr(117)+chr(116)+chr(102)+chr(45)+chr(56)).write(chr(10).join(sorted(names))+chr(10))"
-            rm -f abismal.sam
-          '
-          end=$(date +%s)
-          echo $((end-start)) > bench/out/abismal.seconds.txt
+          for spec in 'ambig|-a' 'm15|-a -m 0.15' 'm20|-a -m 0.20'; do
+            name=${spec%%|*}
+            flags=${spec#*|}
+            start=$(date +%s)
+            docker run --rm -v "$PWD/bench:/bench" bounty1-pace:abismal-truth-bench bash -lc "
+              set -euo pipefail
+              cd /bench/out
+              micromamba run -n abismal abismal map \
+                -i /bench/ref/pace-screen.abismal.idx -t 4 ${flags} \
+                -s abismal-${name}.stats.yaml -o abismal-${name}.sam \
+                /bench/raw/WT_rep1.clean.R1.fastq.gz /bench/raw/WT_rep1.clean.R2.fastq.gz \
+                2> abismal-${name}.stderr.log
+              test -s abismal-${name}.sam
+            "
+            end=$(date +%s)
+            echo $((end-start)) > "bench/out/abismal-${name}.seconds.txt"
+          done
 
-      - name: Compare screens against full-hg19 truth fail-closed
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          for name in ('ambig', 'm15', 'm20'):
+              sam = Path(f'bench/out/abismal-{name}.sam')
+              names = set()
+              with sam.open(encoding='utf-8') as fh:
+                  for line in fh:
+                      if not line or line.startswith('@'):
+                          continue
+                      f = line.rstrip('\n').split('\t')
+                      if len(f) < 11:
+                          raise SystemExit(f'invalid Abismal SAM for {name}')
+                      if int(f[1]) & 4:
+                          continue
+                      names.add(re.sub(r'/[12]$', '', f[0]))
+              if not names:
+                  raise SystemExit(f'Abismal {name} retained zero mapped reads')
+              Path(f'bench/out/abismal-{name}.names.txt').write_text(
+                  '\n'.join(sorted(names)) + '\n', encoding='utf-8'
+              )
+              sam.unlink()
+          PY
+
+      - name: Compare rescue screens against full-hg19 truth fail-closed
         run: |
           set -euo pipefail
           comm -23 bench/out/truth.names.txt bench/out/bwameth-screen.names.txt > bench/out/truth-missed-by-bwameth-screen.txt
-          comm -23 bench/out/truth.names.txt bench/out/abismal.names.txt > bench/out/truth-missed-by-abismal.txt
+          for name in ambig m15 m20; do
+            comm -23 bench/out/truth.names.txt "bench/out/abismal-${name}.names.txt" > "bench/out/truth-missed-by-abismal-${name}.txt"
+          done
+
           truth=$(wc -l < bench/out/truth.names.txt)
           bw=$(wc -l < bench/out/bwameth-screen.names.txt)
-          ab=$(wc -l < bench/out/abismal.names.txt)
           bwmiss=$(wc -l < bench/out/truth-missed-by-bwameth-screen.txt)
-          abmiss=$(wc -l < bench/out/truth-missed-by-abismal.txt)
-          printf 'reads_per_mate=100000\nfull_hg19_mapq30_pace_truth=%s\nbwameth_screen_candidates=%s\nabismal_screen_candidates=%s\ntruth_missed_by_bwameth_screen=%s\ntruth_missed_by_abismal=%s\ntruth_seconds=%s\nbwameth_screen_seconds=%s\nabismal_seconds=%s\n' \
-            "$truth" "$bw" "$ab" "$bwmiss" "$abmiss" \
-            "$(cat bench/out/truth.seconds.txt)" "$(cat bench/out/bwameth-screen.seconds.txt)" "$(cat bench/out/abismal.seconds.txt)" | tee bench/out/summary.txt
+          ambig=$(wc -l < bench/out/abismal-ambig.names.txt)
+          m15=$(wc -l < bench/out/abismal-m15.names.txt)
+          m20=$(wc -l < bench/out/abismal-m20.names.txt)
+          ambigmiss=$(wc -l < bench/out/truth-missed-by-abismal-ambig.txt)
+          m15miss=$(wc -l < bench/out/truth-missed-by-abismal-m15.txt)
+          m20miss=$(wc -l < bench/out/truth-missed-by-abismal-m20.txt)
+
+          printf 'reads_per_mate=100000\nfull_hg19_mapq30_pace_truth=%s\nbwameth_screen_candidates=%s\ntruth_missed_by_bwameth_screen=%s\nbwameth_screen_seconds=%s\nabismal_ambig_candidates=%s\ntruth_missed_by_abismal_ambig=%s\nabismal_ambig_seconds=%s\nabismal_m15_candidates=%s\ntruth_missed_by_abismal_m15=%s\nabismal_m15_seconds=%s\nabismal_m20_candidates=%s\ntruth_missed_by_abismal_m20=%s\nabismal_m20_seconds=%s\ntruth_seconds=%s\n' \
+            "$truth" "$bw" "$bwmiss" "$(cat bench/out/bwameth-screen.seconds.txt)" \
+            "$ambig" "$ambigmiss" "$(cat bench/out/abismal-ambig.seconds.txt)" \
+            "$m15" "$m15miss" "$(cat bench/out/abismal-m15.seconds.txt)" \
+            "$m20" "$m20miss" "$(cat bench/out/abismal-m20.seconds.txt)" \
+            "$(cat bench/out/truth.seconds.txt)" | tee bench/out/summary.txt
+
           test "$bwmiss" -eq 0
-          test "$abmiss" -eq 0
+          test "$m20miss" -eq 0
 
       - name: Upload benchmark evidence
         if: always()
@@ -193,6 +232,6 @@ jobs:
             bench/out/*.seconds.txt
             bench/out/*missed*.txt
             bench/out/*.stderr.log
-            bench/out/abismal.stats.yaml
+            bench/out/abismal-*.stats.yaml
           if-no-files-found: warn
           retention-days: 14
