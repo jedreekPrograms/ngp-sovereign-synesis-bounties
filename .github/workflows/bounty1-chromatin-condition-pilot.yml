@@ -1,5 +1,6 @@
 name: Bounty 1 full-genome chromatin condition pilot
 # Safe push-trigger for a single WT condition pilot while WGBS shards are CPU-bound.
+# WT-only max_parallel=1 keeps CNCB pressure bounded while the WGBS pilot is in CPU-bound prefiltering.
 
 on:
   push:
