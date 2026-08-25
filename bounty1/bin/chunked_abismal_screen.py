@@ -7,6 +7,9 @@ an interleaved producer must advance R1 and R2 together. This helper avoids
 that class of deadlock without materialising whole cleaned libraries: it writes
 one bounded pair of temporary FASTQ chunks, maps that chunk, emits complete
 candidate pairs to gzip outputs, then deletes the chunk before continuing.
+
+This no-op documentation touch intentionally triggers the direct-source
+streaming WT pilot after retiring the staged-source pilot.
 """
 
 from __future__ import annotations
