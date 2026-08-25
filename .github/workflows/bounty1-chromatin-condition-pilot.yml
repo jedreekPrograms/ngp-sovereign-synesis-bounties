@@ -1,6 +1,5 @@
 name: Bounty 1 full-genome chromatin condition pilot
-# Safe push-trigger for a single WT condition pilot while WGBS is CPU-bound.
-# This branch-only pilot is intentionally hard-pinned to WT and max_parallel=1.
+# Branch-only, single-condition WT pilot. Deliberately no matrix/dispatch inputs.
 
 on:
   push:
@@ -13,34 +12,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: bounty1-chromatin-condition-pilot-${{ github.ref }}
+  group: bounty1-chromatin-condition-pilot
   cancel-in-progress: false
 
 jobs:
-  plan:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.matrix.outputs.matrix }}
-    steps:
-      - uses: actions/checkout@v4
-      - id: matrix
-        run: |
-          set -euo pipefail
-          python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import json
-          print('matrix=' + json.dumps({'condition': ['WT']}, separators=(',', ':')))
-          PY
-
-  condition:
-    needs: plan
+  wt_condition:
     runs-on: ubuntu-latest
     timeout-minutes: 355
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     env:
-      CONDITION: ${{ matrix.condition }}
+      CONDITION: WT
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -234,7 +214,7 @@ PY
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bounty1-chromatin-${{ matrix.condition }}-pilot
+          name: bounty1-chromatin-WT-pilot
           path: |
             chromatin/results
             chromatin/qc
