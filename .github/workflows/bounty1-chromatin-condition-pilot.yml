@@ -58,7 +58,7 @@ jobs:
               raise SystemExit(f'expected exactly one matched INPUT for {condition}, got {len(matches)}')
           r = matches[0]
           rows.insert(0, {
-              'sample_id': r['sample_id'], 'kind': 'input', 'mark': '', 'replicate': r['replicate'],
+              'sample_id': r['sample_id'], 'kind': 'input', 'mark': 'INPUT', 'replicate': r['replicate'],
               'r1': r['fastq_1'], 'r2': r['fastq_2'], 'md5_r1': r['read1_md5'], 'md5_r2': r['read2_md5'],
           })
           treatments = [r for r in rows if r['kind'] == 'treatment']
