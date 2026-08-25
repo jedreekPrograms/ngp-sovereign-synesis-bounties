@@ -1,15 +1,12 @@
 name: Bounty 1 full-genome chromatin condition pilot
-# Branch-only, single-condition WT pilot. Deliberately no matrix/dispatch inputs.
 
 on:
   pull_request:
-    branches:
-      - main
+    branches: [main]
     paths:
       - '.github/workflows/bounty1-chromatin-condition-pilot.yml'
   push:
-    branches:
-      - bounty-1-real-pipeline
+    branches: [bounty-1-real-pipeline]
     paths:
       - '.github/workflows/bounty1-chromatin-condition-pilot.yml'
 
@@ -49,7 +46,7 @@ jobs:
           rows = []
           with open('bounty1/resources/samplesheet.csv', newline='', encoding='utf-8') as fh:
               for row in csv.DictReader(fh):
-                  if row['condition'] == condition and row['assay'] == 'CHIP' and row['mark'] in {'H3K9ac','H3K56ac'}:
+                  if row['condition'] == condition and row['assay'] == 'CHIP' and row['mark'] in {'H3K9ac', 'H3K56ac'}:
                       rows.append({
                           'sample_id': row['sample_id'], 'kind': 'treatment', 'mark': row['mark'],
                           'replicate': row['replicate'], 'r1': row['fastq_1'], 'r2': row['fastq_2'],
@@ -65,13 +62,17 @@ jobs:
               'r1': r['fastq_1'], 'r2': r['fastq_2'], 'md5_r1': r['read1_md5'], 'md5_r2': r['read2_md5'],
           })
           treatments = [r for r in rows if r['kind'] == 'treatment']
-          if len(treatments) != 4 or sorted((r['mark'], r['replicate']) for r in treatments) != [
-              ('H3K56ac','1'), ('H3K56ac','2'), ('H3K9ac','1'), ('H3K9ac','2')]:
-              raise SystemExit(f'incomplete treatment set for {condition}: {[(r["mark"],r["replicate"]) for r in treatments]}')
+          expected = [('H3K56ac','1'), ('H3K56ac','2'), ('H3K9ac','1'), ('H3K9ac','2')]
+          if len(treatments) != 4 or sorted((r['mark'], r['replicate']) for r in treatments) != expected:
+              raise SystemExit(f'incomplete treatment set for {condition}')
           with open('chromatin/condition.json', 'w', encoding='utf-8') as out:
               json.dump(rows, out, indent=2)
+          with open('chromatin/rows.tsv', 'w', encoding='utf-8', newline='') as out:
+              for row in rows:
+                  out.write('\t'.join(str(row[k]) for k in ('sample_id','kind','mark','replicate','r1','r2','md5_r1','md5_r2')) + '\n')
           PY
           cat chromatin/condition.json
+          test "$(wc -l < chromatin/rows.tsv)" -eq 5
 
       - name: Prepare verified complete hg19 Bowtie2 reference
         run: |
@@ -116,7 +117,6 @@ jobs:
                 local start
                 start=$(date +%s)
                 echo "[$(date -Is)] START ${sample}" | tee -a /chromatin/qc/timeline.log
-
                 python3 /work/bin/stream_interleaved_fastq.py \
                   --r1-source "$r1" --r2-source "$r2" \
                   --r1-md5 "$md5_1" --r2-md5 "$md5_2" | \
@@ -128,7 +128,6 @@ jobs:
                   2> "/chromatin/qc/${sample}.bowtie2.log" | \
                 samtools view -b - | \
                 samtools sort -n -@ 4 -m 256M -o "${sample}.name.bam"
-
                 samtools fixmate -m "${sample}.name.bam" "${sample}.fixmate.bam"
                 rm -f "${sample}.name.bam"
                 samtools sort -@ 4 -m 256M -o "${sample}.position.bam" "${sample}.fixmate.bam"
@@ -157,19 +156,13 @@ jobs:
                 test "$(cat "/chromatin/results/${sample}.total-fragments.txt")" -gt 0
               }
 
-              python3 - <<'"'"'PY'"'"' > /tmp/rows.tsv
-          import json
-          for r in json.load(open('/chromatin/condition.json', encoding='utf-8')):
-              print('\t'.join(str(r[k]) for k in ('sample_id','kind','mark','replicate','r1','r2','md5_r1','md5_r2')))
-          PY
-
               input_sample=""
               while IFS=$'"'"'\t'"'"' read -r sample kind mark rep r1 r2 md5_1 md5_2; do
                 if [[ "$kind" != input ]]; then continue; fi
                 align_sample "$sample" "$r1" "$r2" "$md5_1" "$md5_2"
                 input_sample="$sample"
                 export_fragments "$sample"
-              done < /tmp/rows.tsv
+              done < /chromatin/rows.tsv
               [[ -n "$input_sample" ]]
 
               while IFS=$'"'"'\t'"'"' read -r sample kind mark rep r1 r2 md5_1 md5_2; do
@@ -188,7 +181,7 @@ jobs:
                 export_fragments "$sample"
                 rm -f "${sample}.mapq30.bam" "${sample}.mapq30.bam.bai"
                 df -h > "/chromatin/qc/${sample}.disk-after-peak-cleanup.txt"
-              done < /tmp/rows.tsv
+              done < /chromatin/rows.tsv
 
               rm -f "${input_sample}.mapq30.bam" "${input_sample}.mapq30.bam.bai"
               sha256sum /chromatin/results/* > /chromatin/qc/results.SHA256SUMS
@@ -224,6 +217,7 @@ jobs:
             chromatin/results
             chromatin/qc
             chromatin/condition.json
+            chromatin/rows.tsv
           if-no-files-found: error
           compression-level: 1
           retention-days: 30
