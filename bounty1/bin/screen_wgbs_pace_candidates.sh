@@ -13,9 +13,10 @@ set -euo pipefail
 # ~12 s and retaining 22,545 candidate pairs. Wider 5/10 kb variants also had
 # zero misses; +/-2 kb is therefore the smallest validated context.
 #
-# When complete hg19 + official PACE +/-500 bp windows are mounted by the
-# production cohort, this script derives the validated +/-2 kb screen itself.
-# The passed SCREEN_REFERENCE_FASTA remains a standalone fallback.
+# When complete hg19 + official PACE +/-500 bp windows are mounted by either
+# the production cohort (/shard) or local runner (/local), this script derives
+# the validated +/-2 kb screen itself. The passed SCREEN_REFERENCE_FASTA
+# remains a standalone fallback.
 #
 # Abismal requires two mate filenames and can open/read them sequentially, so
 # paired FIFOs can deadlock with an interleaved producer. The cleaned fastp
@@ -60,13 +61,21 @@ if (( fastp_threads > 2 )); then
   fastp_threads=2
 fi
 
-# Production v3 currently prepares a legacy fallback screen before invoking
-# this helper. Derive the benchmark-validated context here from complete hg19
-# so deployment cannot silently regress to the older +/-1 kb behavior.
+# Derive the benchmark-validated +/-2 kb context from complete hg19 wherever
+# the current runner mounts it. This prevents local execution from silently
+# falling back to the older +/-1 kb screen that did not achieve zero misses in
+# the full-hg19 truth benchmark.
+ref_root=""
 if [[ -s /shard/ref/hg19.fa && -s /shard/ref/pace.bed ]]; then
+  ref_root="/shard/ref"
+elif [[ -s /local/ref/hg19.fa && -s /local/ref/pace.bed ]]; then
+  ref_root="/local/ref"
+fi
+
+if [[ -n "$ref_root" ]]; then
   ctx_bed="/tmp/${sample_id}.pace-screen-2k.merged.bed"
   ctx_fasta="/tmp/${sample_id}.pace-screen-2k.fa"
-  python3 - /shard/ref/pace.bed "$ctx_bed" <<'PY'
+  python3 - "${ref_root}/pace.bed" "$ctx_bed" <<'PY'
 from collections import defaultdict
 from pathlib import Path
 import sys
@@ -98,7 +107,7 @@ with dst.open("w", encoding="utf-8") as out:
 PY
   : > "$ctx_fasta"
   while read -r chrom start end; do
-    samtools faidx /shard/ref/hg19.fa "${chrom}:$((start + 1))-${end}"
+    samtools faidx "${ref_root}/hg19.fa" "${chrom}:$((start + 1))-${end}"
   done < "$ctx_bed" >> "$ctx_fasta"
   test -s "$ctx_fasta"
   screen_reference="$ctx_fasta"
