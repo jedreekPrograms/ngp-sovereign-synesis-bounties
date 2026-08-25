@@ -1,0 +1,203 @@
+name: Bounty 1 WGBS streaming WT pilot
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/bounty1-wgbs-streaming-wt-pilot.yml'
+      - 'bounty1/bin/stream_interleaved_fastq.py'
+      - 'bounty1/bin/screen_wgbs_pace_candidates.sh'
+      - 'bounty1/bin/chunked_abismal_screen.py'
+
+permissions:
+  contents: read
+  actions: read
+
+# Replace older WT pilot attempts that spend the whole runner budget staging
+# complete source FASTQs. No completed candidate checkpoint is overwritten.
+concurrency:
+  group: bounty1-wgbs-v3-wt-pilot-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wt_rep1_streaming:
+    if: github.head_ref == 'bounty-1-real-pipeline'
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    env:
+      SAMPLE_ID: WT_rep1_WGBS
+      CONDITION: WT
+      REPLICATE: '1'
+      RUN_ACCESSION: HRR1202754
+      R1_URL: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202754/HRR1202754_f1.fq.gz
+      R2_URL: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202754/HRR1202754_r2.fq.gz
+      MD5_R1: 700da70777819f86c98d7665889a329e
+      MD5_R2: 65bd9c8f90bc32536ad05a41bb578dd8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Load pinned analysis image from shared cache
+        uses: docker/build-push-action@v6
+        with:
+          context: bounty1
+          load: true
+          pull: true
+          tags: bounty1-pace:wgbs-streaming-pilot
+          cache-from: type=gha,scope=bounty1-docker
+          cache-to: type=gha,mode=max,scope=bounty1-docker
+
+      - name: Prepare checksum-verified hg19 and PACE references
+        run: |
+          set -euo pipefail
+          mkdir -p shard/ref shard/out shard/qc
+          curl -fsSL --retry 10 --retry-delay 5 --retry-all-errors \
+            -o shard/ref/hg19.fa.gz \
+            https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz
+          curl -fsSL --retry 10 --retry-delay 5 --retry-all-errors \
+            -o shard/ref/md5sum.txt \
+            https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/md5sum.txt
+          (
+            cd shard/ref
+            grep -E '[[:space:]]hg19.fa.gz$' md5sum.txt > hg19.fa.gz.md5
+            md5sum --check hg19.fa.gz.md5
+            gzip -d hg19.fa.gz
+          )
+          docker run --rm -v "$PWD/shard:/shard" bounty1-pace:wgbs-streaming-pilot bash -lc '
+            set -euo pipefail
+            samtools faidx /shard/ref/hg19.fa
+            Rscript /work/bin/export_pace_regions.R --output /shard/ref/pace.bed --flank 500
+            samtools faidx /shard/ref/hg19.fa chr1:100000-101000 > /shard/ref/pace-screen.fa
+            test -s /shard/ref/pace-screen.fa
+          '
+
+      - name: Stream complete source FASTQs through validated Abismal PACE prefilter
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -e SAMPLE_ID -e R1_URL -e R2_URL -e MD5_R1 -e MD5_R2 \
+            -v "$PWD/shard:/shard" bounty1-pace:wgbs-streaming-pilot bash -lc '
+              set -euo pipefail
+              cd /shard/out
+              bash /work/bin/screen_wgbs_pace_candidates.sh \
+                "$SAMPLE_ID" "$R1_URL" "$R2_URL" \
+                "$MD5_R1" "$MD5_R2" /shard/ref/pace-screen.fa 4
+            '
+          test -s "shard/out/${SAMPLE_ID}.candidate.R1.fastq.gz"
+          test -s "shard/out/${SAMPLE_ID}.candidate.R2.fastq.gz"
+          gzip -t "shard/out/${SAMPLE_ID}.candidate.R1.fastq.gz"
+          gzip -t "shard/out/${SAMPLE_ID}.candidate.R2.fastq.gz"
+          r1=$(gzip -cd "shard/out/${SAMPLE_ID}.candidate.R1.fastq.gz" | wc -l)
+          r2=$(gzip -cd "shard/out/${SAMPLE_ID}.candidate.R2.fastq.gz" | wc -l)
+          (( r1 > 0 && r1 == r2 && r1 % 4 == 0 ))
+          echo $((r1 / 4)) > "shard/qc/${SAMPLE_ID}.candidate-pair-count.txt"
+
+      - name: Upload candidate checkpoint before full-hg19 alignment
+        run: |
+          set -euo pipefail
+          mkdir -p checkpoint-candidate
+          cp "shard/out/${SAMPLE_ID}.candidate.R1.fastq.gz" checkpoint-candidate/
+          cp "shard/out/${SAMPLE_ID}.candidate.R2.fastq.gz" checkpoint-candidate/
+          cp "shard/qc/${SAMPLE_ID}.candidate-pair-count.txt" checkpoint-candidate/
+          cp "shard/out/${SAMPLE_ID}.pace-screen.pipeline-status.txt" checkpoint-candidate/
+          (cd checkpoint-candidate && sha256sum "${SAMPLE_ID}.candidate.R1.fastq.gz" "${SAMPLE_ID}.candidate.R2.fastq.gz" > SHA256SUMS)
+          cat > checkpoint-candidate/checkpoint.json <<EOF
+          {"sample_id":"${SAMPLE_ID}","stage":"candidate","source_r1_md5":"${MD5_R1}","source_r2_md5":"${MD5_R2}","run_accession":"${RUN_ACCESSION}","screen":"Abismal 3.3.0 PACE +/-2 kb -a -m 0.20; resumable direct-source streaming","git_sha":"${GITHUB_SHA}"}
+          EOF
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bounty1-wgbs-v3-${{ env.SAMPLE_ID }}-candidate
+          path: checkpoint-candidate
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+
+      - name: Build complete hg19 bwa-meth index after checkpoint
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/shard:/shard" bounty1-pace:wgbs-streaming-pilot bash -lc '
+            set -euo pipefail
+            bwameth.py index /shard/ref/hg19.fa
+          '
+
+      - name: Align candidates to complete hg19 with MAPQ30 and sample-level dedup
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -e SAMPLE_ID -e WGBS_SKIP_FASTP=1 -e WGBS_SORT_MEM=256M \
+            -v "$PWD/shard:/shard" bounty1-pace:wgbs-streaming-pilot bash -lc '
+              set -euo pipefail
+              cd /shard/out
+              bash /work/bin/stream_wgbs_bwameth.sh \
+                "$SAMPLE_ID" "${SAMPLE_ID}.candidate.R1.fastq.gz" "${SAMPLE_ID}.candidate.R2.fastq.gz" \
+                "" "" /shard/ref/hg19.fa /shard/ref/pace.bed 30 4
+            '
+          test -s "shard/out/${SAMPLE_ID}.mapq30.pace-targets.deduplicated.bam"
+          test -s "shard/out/${SAMPLE_ID}.mapq30.pace-targets.deduplicated.bam.bai"
+
+      - name: Upload BAM checkpoint
+        run: |
+          set -euo pipefail
+          mkdir -p checkpoint-bam
+          cp "shard/out/${SAMPLE_ID}.mapq30.pace-targets.deduplicated.bam" checkpoint-bam/
+          cp "shard/out/${SAMPLE_ID}.mapq30.pace-targets.deduplicated.bam.bai" checkpoint-bam/
+          (cd checkpoint-bam && sha256sum * > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bounty1-wgbs-v3-${{ env.SAMPLE_ID }}-bam
+          path: checkpoint-bam
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+
+      - name: Extract PACE-region CpG methylation
+        run: |
+          set -euo pipefail
+          docker run --rm -e SAMPLE_ID -v "$PWD/shard:/shard" bounty1-pace:wgbs-streaming-pilot bash -lc '
+            set -euo pipefail
+            cd /shard/out
+            micromamba run -n methyldackel MethylDackel extract \
+              -q 30 -p 5 --minDepth 1 -@ 2 /shard/ref/hg19.fa \
+              "${SAMPLE_ID}.mapq30.pace-targets.deduplicated.bam" -o "${SAMPLE_ID}.methyldackel"
+            test -s "${SAMPLE_ID}.methyldackel_CpG.bedGraph"
+            python3 /work/bin/methyldackel_to_bismark.py \
+              --input "${SAMPLE_ID}.methyldackel_CpG.bedGraph" \
+              --output "/shard/qc/${SAMPLE_ID}.bismark.cov.gz"
+            gzip -t "/shard/qc/${SAMPLE_ID}.bismark.cov.gz"
+            test "$(gzip -cd "/shard/qc/${SAMPLE_ID}.bismark.cov.gz" | wc -l)" -gt 0
+          '
+
+      - name: Build terminal coverage checkpoint
+        run: |
+          set -euo pipefail
+          cov="shard/qc/${SAMPLE_ID}.bismark.cov.gz"
+          mkdir -p checkpoint-coverage
+          cp "$cov" checkpoint-coverage/
+          (cd checkpoint-coverage && sha256sum "${SAMPLE_ID}.bismark.cov.gz" > SHA256SUMS)
+          rows=$(gzip -cd "$cov" | wc -l)
+          cat > checkpoint-coverage/checkpoint.json <<EOF
+          {"sample_id":"${SAMPLE_ID}","condition":"${CONDITION}","replicate":"${REPLICATE}","stage":"coverage","coverage_rows":${rows},"source_r1_md5":"${MD5_R1}","source_r2_md5":"${MD5_R2}","final_reference":"UCSC hg19","mapq":30,"methylation_min_depth_raw":1,"dunedinpace_min_depth":6,"git_sha":"${GITHUB_SHA}"}
+          EOF
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bounty1-wgbs-v3-${{ env.SAMPLE_ID }}-coverage
+          path: checkpoint-coverage
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
+
+      - name: Upload compact diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounty1-wgbs-streaming-${{ env.SAMPLE_ID }}-diagnostics
+          path: |
+            shard/qc
+            shard/out/*.log
+            shard/out/*.txt
+            shard/out/*.yaml
+            shard/out/*.json
+          if-no-files-found: warn
+          retention-days: 14
