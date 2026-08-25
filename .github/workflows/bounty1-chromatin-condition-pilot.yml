@@ -1,6 +1,6 @@
 name: Bounty 1 full-genome chromatin condition pilot
-# Safe push-trigger for a single WT condition pilot while WGBS shards are CPU-bound.
-# WT-only max_parallel=1 keeps CNCB pressure bounded while the WGBS pilot is in CPU-bound prefiltering.
+# Safe push-trigger for a single WT condition pilot while WGBS is CPU-bound.
+# This branch-only pilot is intentionally hard-pinned to WT and max_parallel=1.
 
 on:
   push:
@@ -8,16 +8,6 @@ on:
       - bounty-1-real-pipeline
     paths:
       - '.github/workflows/bounty1-chromatin-condition-pilot.yml'
-  workflow_dispatch:
-    inputs:
-      condition_regex:
-        description: Regex selecting WT/SIRT1..SIRT7 conditions
-        required: true
-        default: '^WT$'
-      max_parallel:
-        description: Maximum conditions processed concurrently
-        required: true
-        default: '1'
 
 permissions:
   contents: read
@@ -34,17 +24,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: matrix
-        env:
-          CONDITION_REGEX: ${{ inputs.condition_regex || '^WT$' }}
         run: |
           set -euo pipefail
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import json, os, re
-          pattern = re.compile(os.environ['CONDITION_REGEX'])
-          conditions = [c for c in ['WT','SIRT1','SIRT2','SIRT3','SIRT4','SIRT5','SIRT6','SIRT7'] if pattern.search(c)]
-          if not conditions:
-              raise SystemExit('condition_regex selected no conditions')
-          print('matrix=' + json.dumps({'condition': conditions}, separators=(',', ':')))
+          import json
+          print('matrix=' + json.dumps({'condition': ['WT']}, separators=(',', ':')))
           PY
 
   condition:
@@ -53,7 +37,7 @@ jobs:
     timeout-minutes: 355
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJSON(inputs.max_parallel || '1') }}
+      max-parallel: 1
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     env:
       CONDITION: ${{ matrix.condition }}
