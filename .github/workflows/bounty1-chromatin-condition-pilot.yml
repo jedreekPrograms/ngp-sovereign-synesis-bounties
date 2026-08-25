@@ -39,7 +39,7 @@ jobs:
       - name: Build condition manifest
         run: |
           set -euo pipefail
-          mkdir -p chromatin/{ref,work,qc,results}
+          mkdir -p chromatin/{ref,work,qc,results,source}
           python3 - <<'PY'
           import csv, json, os
           condition = os.environ['CONDITION']
@@ -102,7 +102,7 @@ jobs:
           du -sh chromatin/ref > chromatin/qc/reference-size.txt
           df -h > chromatin/qc/disk-after-reference.txt
 
-      - name: Stream full FASTQs, align, deduplicate, call peaks and retain compact fragment evidence
+      - name: Download each library resumably, align, deduplicate, call peaks and retain compact fragment evidence
         run: |
           set -euo pipefail
           docker run --rm \
@@ -112,13 +112,45 @@ jobs:
               set -euo pipefail
               cd /chromatin/work
 
+              download_verified() {
+                local url="$1" expected_md5="$2" dest="$3" label="$4"
+                local attempt actual
+                mkdir -p "$(dirname "$dest")"
+                for attempt in 1 2 3 4; do
+                  echo "[$(date -Is)] DOWNLOAD ${label} attempt=${attempt}" | tee -a /chromatin/qc/timeline.log
+                  touch "$dest"
+                  if curl -fL --retry 20 --retry-delay 5 --retry-all-errors \
+                       --connect-timeout 30 --speed-time 120 --speed-limit 1024 \
+                       -C - -o "$dest" "$url" \
+                       >> "/chromatin/qc/${label}.curl.stdout.log" \
+                       2>> "/chromatin/qc/${label}.curl.stderr.log"; then
+                    actual=$(md5sum "$dest" | awk '"'"'{print $1}'"'"')
+                    if [[ "${actual,,}" == "${expected_md5,,}" ]] && gzip -t "$dest"; then
+                      echo "${actual}  ${dest}" > "/chromatin/qc/${label}.source-md5.txt"
+                      return 0
+                    fi
+                    echo "${label}: completed transfer failed MD5/gzip validation; restarting from byte 0" \
+                      | tee -a /chromatin/qc/timeline.log >&2
+                  fi
+                  rm -f "$dest"
+                  sleep $((attempt * 10))
+                done
+                echo "${label}: source transfer failed after 4 verified attempts" >&2
+                return 1
+              }
+
               align_sample() {
                 local sample="$1" r1="$2" r2="$3" md5_1="$4" md5_2="$5"
-                local start
+                local start local_r1 local_r2
                 start=$(date +%s)
+                local_r1="/chromatin/source/${sample}.R1.fastq.gz"
+                local_r2="/chromatin/source/${sample}.R2.fastq.gz"
                 echo "[$(date -Is)] START ${sample}" | tee -a /chromatin/qc/timeline.log
+                download_verified "$r1" "$md5_1" "$local_r1" "${sample}.R1"
+                download_verified "$r2" "$md5_2" "$local_r2" "${sample}.R2"
+                df -h > "/chromatin/qc/${sample}.disk-after-source.txt"
                 python3 /work/bin/stream_interleaved_fastq.py \
-                  --r1-source "$r1" --r2-source "$r2" \
+                  --r1-source "$local_r1" --r2-source "$local_r2" \
                   --r1-md5 "$md5_1" --r2-md5 "$md5_2" | \
                 fastp --stdin --interleaved_in --stdout --thread 4 \
                   --json "/chromatin/qc/${sample}.fastp.json" \
@@ -128,6 +160,7 @@ jobs:
                   2> "/chromatin/qc/${sample}.bowtie2.log" | \
                 samtools view -b - | \
                 samtools sort -n -@ 4 -m 256M -o "${sample}.name.bam"
+                rm -f "$local_r1" "$local_r2"
                 samtools fixmate -m "${sample}.name.bam" "${sample}.fixmate.bam"
                 rm -f "${sample}.name.bam"
                 samtools sort -@ 4 -m 256M -o "${sample}.position.bam" "${sample}.fixmate.bam"
@@ -198,14 +231,15 @@ jobs:
           condition=${CONDITION}
           source_scope=complete published paired FASTQ archives for two H3K9ac replicates, two H3K56ac replicates and one matched INPUT
           source_integrity=published MD5 verified on exact compressed bytes before successful completion
-          trimming=fastp streamed, no raw or trimmed FASTQ staging
+          transfer=resumable one-library-at-a-time compressed FASTQ staging with retry, MD5 and gzip validation; source files deleted immediately after alignment
+          trimming=fastp streamed from verified local compressed source; no trimmed FASTQ staging
           reference=complete UCSC hg19, source MD5 verified
           aligner=Bowtie2 --very-sensitive
           duplicate_removal=samtools fixmate + coordinate sort + markdup -r within each biological library
           mapq_threshold=30
           peak_caller=MACS3 BAMPE q<=0.01 with matched condition INPUT
           retained_fragment_evidence=one BED row per MAPQ30 proper-pair read1 fragment; sufficient for exact later overlap counting against a fixed peak universe
-          note=pilot architecture avoids repeated INPUT download within a condition and deletes heavy BAM intermediates after compact fragment evidence and peaks are validated
+          note=pilot architecture downloads matched INPUT exactly once per condition and deletes heavy source/BAM intermediates after validated compact evidence is retained
           EOF
 
       - name: Upload compact chromatin condition evidence
