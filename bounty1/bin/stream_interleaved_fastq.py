@@ -6,17 +6,126 @@ For paired-end input, records are emitted as an interleaved FASTQ stream
 `fastp --stdin --interleaved_in` without named pipes or raw-file staging.
 MD5 is calculated over the exact compressed source bytes, not decompressed
 FASTQ content.
+
+Remote HTTP(S) inputs are read through a small fail-closed Range-resume reader.
+If a server closes a large transfer early, the reader reopens the same object
+at the next compressed byte instead of restarting the whole FASTQ. This keeps
+large GitHub Actions runs bounded by useful analysis work rather than fragile
+multi-hour staging downloads.
 """
 import argparse
 import gzip
 import hashlib
 import sys
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import ExitStack
 from pathlib import Path
 
-REMOTE_SCHEMES = {'http', 'https', 'ftp'}
+REMOTE_SCHEMES = {'http', 'https'}
+RETRYABLE_ERRORS = (
+    TimeoutError,
+    ConnectionError,
+    urllib.error.URLError,
+    OSError,
+)
+
+
+class ResumableHTTPReader:
+    """Sequential binary HTTP reader with transparent byte-range resume."""
+
+    def __init__(self, source, timeout=120, max_retries=100, retry_delay=5):
+        self.source = source
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
+        self.offset = 0
+        self.total_size = None
+        self.response = None
+        self.retries = 0
+        self._open(0)
+
+    def _request(self, offset):
+        headers = {'User-Agent': 'bounty1-fastq-stream/2.0'}
+        if offset:
+            headers['Range'] = f'bytes={offset}-'
+        request = urllib.request.Request(self.source, headers=headers)
+        return urllib.request.urlopen(request, timeout=self.timeout)  # nosec B310
+
+    def _open(self, offset):
+        if self.response is not None:
+            self.response.close()
+        response = self._request(offset)
+        status = getattr(response, 'status', None)
+        content_range = response.headers.get('Content-Range', '')
+        content_length = response.headers.get('Content-Length')
+
+        if offset:
+            if status != 206 or not content_range.startswith(f'bytes {offset}-'):
+                response.close()
+                raise IOError(
+                    f'server did not honor Range resume at byte {offset}: '
+                    f'status={status} content-range={content_range!r}'
+                )
+        if content_range and '/' in content_range:
+            total = content_range.rsplit('/', 1)[1]
+            if total.isdigit():
+                self.total_size = int(total)
+        elif offset == 0 and content_length and content_length.isdigit():
+            self.total_size = int(content_length)
+
+        self.response = response
+
+    def _resume(self, reason):
+        self.retries += 1
+        if self.retries > self.max_retries:
+            raise IOError(
+                f'exhausted {self.max_retries} HTTP resume attempts for '
+                f'{self.source} at byte {self.offset}'
+            ) from reason
+        print(
+            f'HTTP resume {self.retries}/{self.max_retries}: '
+            f'{self.source} at compressed byte {self.offset}: {reason}',
+            file=sys.stderr,
+        )
+        time.sleep(self.retry_delay)
+        self._open(self.offset)
+
+    def read(self, size=-1):
+        while True:
+            try:
+                data = self.response.read(size)
+            except RETRYABLE_ERRORS as exc:
+                self._resume(exc)
+                continue
+
+            if data:
+                self.offset += len(data)
+                return data
+
+            if self.total_size is None or self.offset >= self.total_size:
+                return b''
+
+            self._resume(
+                EOFError(
+                    f'premature HTTP EOF at byte {self.offset} of '
+                    f'{self.total_size}'
+                )
+            )
+
+    def close(self):
+        if self.response is not None:
+            self.response.close()
+            self.response = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
 
 
 class HashingReader:
@@ -51,9 +160,11 @@ class HashingReader:
 def open_source(source, timeout):
     parsed = urllib.parse.urlparse(source)
     if parsed.scheme in REMOTE_SCHEMES:
+        return ResumableHTTPReader(source, timeout=timeout)
+    if parsed.scheme == 'ftp':
         request = urllib.request.Request(
             source,
-            headers={'User-Agent': 'bounty1-fastq-stream/1.0'},
+            headers={'User-Agent': 'bounty1-fastq-stream/2.0'},
         )
         return urllib.request.urlopen(request, timeout=timeout)  # nosec B310
     if parsed.scheme:
