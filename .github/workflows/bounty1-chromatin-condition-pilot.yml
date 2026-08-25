@@ -158,10 +158,10 @@ jobs:
               }
 
               python3 - <<'"'"'PY'"'"' > /tmp/rows.tsv
-import json
-for r in json.load(open('/chromatin/condition.json', encoding='utf-8')):
-    print('\t'.join(str(r[k]) for k in ('sample_id','kind','mark','replicate','r1','r2','md5_r1','md5_r2')))
-PY
+          import json
+          for r in json.load(open('/chromatin/condition.json', encoding='utf-8')):
+              print('\t'.join(str(r[k]) for k in ('sample_id','kind','mark','replicate','r1','r2','md5_r1','md5_r2')))
+          PY
 
               input_sample=""
               while IFS=$'"'"'\t'"'"' read -r sample kind mark rep r1 r2 md5_1 md5_2; do
