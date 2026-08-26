@@ -1,4 +1,4 @@
-name: Bounty 1 WGBS prefilter benchmark
+name: Bounty 1 WGBS Abismal parallelism benchmark
 
 on:
   workflow_dispatch:
@@ -7,19 +7,19 @@ on:
       - main
     paths:
       - '.github/workflows/bounty1-wgbs-prefilter-benchmark.yml'
-      - 'bounty1/Dockerfile'
-      - 'bounty1/bin/benchmark_wgbs_prefilters.sh'
 
 permissions:
   contents: read
 
 jobs:
   benchmark:
+    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'bounty-1-real-pipeline'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
+
       - name: Load pinned analysis image from shared cache
         uses: docker/build-push-action@v6
         with:
@@ -30,10 +30,10 @@ jobs:
           cache-from: type=gha,scope=bounty1-docker
           cache-to: type=gha,mode=max,scope=bounty1-docker
 
-      - name: Stream 200k real WT pairs and prepare narrow PACE reference
+      - name: Prepare one real 1M-pair WT prefix and validated PACE +/-2 kb Abismal index
         run: |
           set -euo pipefail
-          mkdir -p bench/ref bench/raw bench/out
+          mkdir -p bench/raw bench/ref bench/out bench/chunks
           python3 - <<'PY'
           import gzip, urllib.request
           from pathlib import Path
@@ -42,19 +42,41 @@ jobs:
               'R1': 'https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202754/HRR1202754_f1.fq.gz',
               'R2': 'https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202754/HRR1202754_r2.fq.gz',
           }
-          n = 200_000
+          n = 1_000_000
           for mate, url in urls.items():
               out = Path(f'bench/raw/WT_rep1.{mate}.fastq.gz')
-              req = urllib.request.Request(url, headers={'User-Agent': 'bounty1-prefilter-benchmark/1'})
+              req = urllib.request.Request(url, headers={'User-Agent': 'bounty1-abismal-parallel-benchmark/1'})
               with urllib.request.urlopen(req, timeout=60) as resp, gzip.GzipFile(fileobj=resp) as src, gzip.open(out, 'wb', compresslevel=1) as dst:
-                  for _ in range(n):
+                  for i in range(n):
                       rec = [src.readline() for _ in range(4)]
                       if any(not x for x in rec):
-                          raise SystemExit(f'{mate}: source ended before {n} records')
+                          raise SystemExit(f'{mate}: source ended before {n} records at {i}')
                       dst.writelines(rec)
           PY
           gzip -t bench/raw/WT_rep1.R1.fastq.gz
           gzip -t bench/raw/WT_rep1.R2.fastq.gz
+
+          # Split the same exact input into four 250k-pair chunks. Every mode
+          # below maps these identical chunks, so candidate-set equality is a
+          # fail-closed guard on the parallelism experiment.
+          python3 - <<'PY'
+          import gzip
+          from pathlib import Path
+
+          pairs_per_chunk = 250_000
+          for mate in ('R1', 'R2'):
+              with gzip.open(f'bench/raw/WT_rep1.{mate}.fastq.gz', 'rb') as src:
+                  for chunk in range(1, 5):
+                      out = Path(f'bench/chunks/q{chunk}.{mate}.fastq')
+                      with out.open('wb') as dst:
+                          for i in range(pairs_per_chunk):
+                              rec = [src.readline() for _ in range(4)]
+                              if any(not x for x in rec):
+                                  raise SystemExit(f'{mate}: truncated while writing chunk {chunk} pair {i}')
+                              dst.writelines(rec)
+                  if src.readline():
+                      raise SystemExit(f'{mate}: benchmark prefix unexpectedly contains >1M records')
+          PY
 
           curl -fsSL --retry 10 --retry-delay 5 --retry-all-errors \
             -o bench/ref/hg19.fa.gz \
@@ -73,148 +95,121 @@ jobs:
             set -euo pipefail
             samtools faidx /bench/ref/hg19.fa
             Rscript /work/bin/export_pace_regions.R --output /bench/ref/pace.bed --flank 500
-          '
-
-          python3 - <<'PY'
+            python3 - /bench/ref/pace.bed /bench/ref/pace-screen-2k.merged.bed <<"PY"
           from collections import defaultdict
           from pathlib import Path
-          src=Path('bench/ref/pace.bed'); dst=Path('bench/ref/pace-screen.merged.bed')
-          by=defaultdict(list)
-          for line in src.read_text().splitlines():
-              if not line or line.startswith('#'): continue
-              f=line.split('\t'); by[f[0]].append((max(0,int(f[1])-500),int(f[2])+500))
-          with dst.open('w') as out:
+          import sys
+          by = defaultdict(list)
+          for line in Path(sys.argv[1]).read_text().splitlines():
+              if not line or line.startswith("#"):
+                  continue
+              f = line.split("\t")
+              by[f[0]].append((max(0, int(f[1]) - 1500), int(f[2]) + 1500))
+          with Path(sys.argv[2]).open("w") as out:
               for chrom in sorted(by):
-                  merged=[]
-                  for s,e in sorted(by[chrom]):
-                      if not merged or s>merged[-1][1]: merged.append([s,e])
-                      else: merged[-1][1]=max(merged[-1][1],e)
-                  for s,e in merged: out.write(f'{chrom}\t{s}\t{e}\n')
+                  merged = []
+                  for start, end in sorted(by[chrom]):
+                      if not merged or start > merged[-1][1]:
+                          merged.append([start, end])
+                      else:
+                          merged[-1][1] = max(merged[-1][1], end)
+                  for start, end in merged:
+                      out.write(f"{chrom}\t{start}\t{end}\n")
           PY
-
-          docker run --rm -v "$PWD/bench:/bench" bounty1-pace:prefilter-bench bash -lc '
-            set -euo pipefail
-            : > /bench/ref/pace-screen.fa
+            : > /bench/ref/pace-screen-2k.fa
             while read -r chrom start end; do
               samtools faidx /bench/ref/hg19.fa "${chrom}:$((start+1))-${end}"
-            done < /bench/ref/pace-screen.merged.bed >> /bench/ref/pace-screen.fa
-            samtools faidx /bench/ref/pace-screen.fa
-            bwameth.py index /bench/ref/pace-screen.fa
-            mkdir -p /bench/ref/bismark_genome
-            cp /bench/ref/pace-screen.fa /bench/ref/bismark_genome/pace-screen.fa
-            bismark_genome_preparation --bowtie2 /bench/ref/bismark_genome
+            done < /bench/ref/pace-screen-2k.merged.bed >> /bench/ref/pace-screen-2k.fa
+            test -s /bench/ref/pace-screen-2k.fa
+            micromamba run -n abismal abismal idx -t 4 \
+              /bench/ref/pace-screen-2k.fa /bench/ref/pace-screen-2k.fa.abismal.idx
+            test -s /bench/ref/pace-screen-2k.fa.abismal.idx
           '
 
-      - name: Fastp once for benchmark input
+      - name: Benchmark 1x4 vs 2x2 vs 4x1 Abismal process layouts
         run: |
           set -euo pipefail
           docker run --rm -v "$PWD/bench:/bench" bounty1-pace:prefilter-bench bash -lc '
             set -euo pipefail
-            fastp -i /bench/raw/WT_rep1.R1.fastq.gz -I /bench/raw/WT_rep1.R2.fastq.gz \
-              -o /bench/raw/WT_rep1.clean.R1.fastq.gz -O /bench/raw/WT_rep1.clean.R2.fastq.gz \
-              --thread 2 --json /bench/out/fastp.json --html /bench/out/fastp.html
-          '
+            cd /bench
+            idx=/bench/ref/pace-screen-2k.fa.abismal.idx
 
-      - name: Benchmark current bwameth candidate screen
-        run: |
-          set -euo pipefail
-          start=$(date +%s)
-          docker run --rm -v "$PWD/bench:/bench" bounty1-pace:prefilter-bench bash -lc '
-            set -euo pipefail
-            cd /bench/out
-            python3 /work/bin/stream_interleaved_fastq.py \
-              --r1-source /bench/raw/WT_rep1.clean.R1.fastq.gz \
-              --r2-source /bench/raw/WT_rep1.clean.R2.fastq.gz | \
-            bwameth.py --threads 4 --interleaved --reference /bench/ref/pace-screen.fa /dev/stdin 2> bwameth.stderr.log | \
-            samtools view -h -F SECONDARY,SUPPLEMENTARY -e "!(flag.unmap && flag.munmap)" - | \
-            samtools view -b -o bwameth.candidates.bam -
-            samtools view bwameth.candidates.bam | cut -f1 | sort -u > bwameth.names.txt
-          '
-          end=$(date +%s)
-          echo $((end-start)) > bench/out/bwameth.seconds.txt
+            map_chunk() {
+              mode="$1"; chunk="$2"; threads="$3"
+              sam="/bench/out/${mode}.q${chunk}.sam"
+              names="/bench/out/${mode}.q${chunk}.names.txt"
+              log="/bench/out/${mode}.q${chunk}.stderr.log"
+              micromamba run -n abismal abismal map \
+                -i "$idx" -t "$threads" -a -m 0.20 \
+                -o "$sam" "/bench/chunks/q${chunk}.R1.fastq" "/bench/chunks/q${chunk}.R2.fastq" \
+                2> "$log"
+              test -s "$sam"
+              awk -F "\t" '\''!/^@/ { if (and($2,4)==0) { q=$1; sub(/\/[12]$/, "", q); print q } }'\'' "$sam" | LC_ALL=C sort -u > "$names"
+              test -s "$names"
+              rm -f "$sam"
+            }
 
-      - name: Benchmark permissive Bismark single-mate screen
-        run: |
-          set -euo pipefail
-          start=$(date +%s)
-          docker run --rm -v "$PWD/bench:/bench" bounty1-pace:prefilter-bench bash -lc '
-            set -euo pipefail
-            cd /bench/out
-            rm -f bismark.names.txt
-            for mate in R1 R2; do
-              mkdir -p "bismark_${mate}"
-              bismark --genome /bench/ref/bismark_genome \
-                --bowtie2 --non_directional -n 1 -l 15 --score_min L,0,-0.6 \
-                -p 4 --bam --temp_dir "bismark_${mate}/tmp" --output_dir "bismark_${mate}" \
-                "/bench/raw/WT_rep1.clean.${mate}.fastq.gz"
-              bam=$(find "bismark_${mate}" -maxdepth 1 -type f -name "*.bam" | head -1)
-              test -n "$bam" -a -s "$bam"
-              samtools view -F 2308 "$bam" | cut -f1 >> bismark.names.txt
+            # Baseline: one 4-thread Abismal process at a time (same semantics
+            # as the current sequential production chunk helper).
+            start=$(date +%s)
+            for q in 1 2 3 4; do map_chunk serial4 "$q" 4; done
+            serial_seconds=$(( $(date +%s) - start ))
+            LC_ALL=C sort -u /bench/out/serial4.q*.names.txt > /bench/out/serial4.names.txt
+
+            # Two independent 2-thread mappers, keeping total requested CPU=4.
+            start=$(date +%s)
+            for first in 1 3; do
+              second=$((first + 1))
+              map_chunk parallel2x2 "$first" 2 & p1=$!
+              map_chunk parallel2x2 "$second" 2 & p2=$!
+              wait "$p1"; wait "$p2"
             done
-            sort -u -o bismark.names.txt bismark.names.txt
-          '
-          end=$(date +%s)
-          echo $((end-start)) > bench/out/bismark.seconds.txt
+            p2_seconds=$(( $(date +%s) - start ))
+            LC_ALL=C sort -u /bench/out/parallel2x2.q*.names.txt > /bench/out/parallel2x2.names.txt
 
-      - name: Benchmark permissive BSMAP single-mate screen
-        run: |
-          set -euo pipefail
-          start=$(date +%s)
-          docker run --rm -v "$PWD/bench:/bench" bounty1-pace:prefilter-bench bash -lc '
-            set -euo pipefail
-            cd /bench/out
-            rm -f bsmap.names.txt bsmap.R1.names.txt bsmap.R2.names.txt bsmap.*.sam bsmap.*.stderr.log bsmap.which.log
-            # BSMAP 2.90 predates modern samtools. Keep it isolated from the
-            # samtools parser: write SAM to disk and extract mapped qnames with
-            # a format-stable Python parser. Alignment parameters are unchanged.
-            micromamba run -n bsmap which bsmap > bsmap.which.log 2>&1
-            for mate in R1 R2; do
-              : > "bsmap.${mate}.stderr.log"
-              micromamba run -n bsmap bsmap \
-                -a "/bench/raw/WT_rep1.clean.${mate}.fastq.gz" \
-                -d /bench/ref/pace-screen.fa \
-                -o "/bench/out/bsmap.${mate}.sam" \
-                -p 2 -3 -n 1 -s 12 -v 0.12 -g 3 -r 1 \
-                2> "bsmap.${mate}.stderr.log"
-              test -s "bsmap.${mate}.sam"
-              python3 -c "import re,sys; rows=[l.rstrip(chr(10)).split(chr(9)) for l in open(sys.argv[1], encoding=chr(117)+chr(116)+chr(102)+chr(45)+chr(56)) if l and not l.startswith(chr(64))]; assert rows and all(len(f)>=11 for f in rows), chr(105)+chr(110)+chr(118)+chr(97)+chr(108)+chr(105)+chr(100)+chr(32)+chr(66)+chr(83)+chr(77)+chr(65)+chr(80)+chr(32)+chr(83)+chr(65)+chr(77); seen=sorted({re.sub(r\"/[12]$\", \"\", f[0]) for f in rows if not (int(f[1]) & 4)}); assert seen, chr(110)+chr(111)+chr(32)+chr(109)+chr(97)+chr(112)+chr(112)+chr(101)+chr(100)+chr(32)+chr(66)+chr(83)+chr(77)+chr(65)+chr(80)+chr(32)+chr(114)+chr(101)+chr(97)+chr(100)+chr(115); open(sys.argv[2], chr(119), encoding=chr(117)+chr(116)+chr(102)+chr(45)+chr(56)).write(chr(10).join(seen)+chr(10))" "bsmap.${mate}.sam" "bsmap.${mate}.names.txt"
-              rm -f "bsmap.${mate}.sam"
-              test -s "bsmap.${mate}.names.txt"
+            # Four independent single-thread mappers, again CPU budget=4.
+            start=$(date +%s)
+            pids=""
+            for q in 1 2 3 4; do
+              map_chunk parallel4x1 "$q" 1 & pids="$pids $!"
             done
-            sort -u bsmap.R1.names.txt bsmap.R2.names.txt > bsmap.names.txt
-            test -s bsmap.names.txt
-          '
-          end=$(date +%s)
-          echo $((end-start)) > bench/out/bsmap.seconds.txt
+            for p in $pids; do wait "$p"; done
+            p4_seconds=$(( $(date +%s) - start ))
+            LC_ALL=C sort -u /bench/out/parallel4x1.q*.names.txt > /bench/out/parallel4x1.names.txt
 
-      - name: Require candidate supersets and summarize
-        run: |
-          set -euo pipefail
-          comm -23 bench/out/bwameth.names.txt bench/out/bismark.names.txt > bench/out/bwameth-missed-by-bismark.txt
-          comm -23 bench/out/bwameth.names.txt bench/out/bsmap.names.txt > bench/out/bwameth-missed-by-bsmap.txt
-          bw=$(wc -l < bench/out/bwameth.names.txt)
-          bi=$(wc -l < bench/out/bismark.names.txt)
-          bs=$(wc -l < bench/out/bsmap.names.txt)
-          bimiss=$(wc -l < bench/out/bwameth-missed-by-bismark.txt)
-          bsmiss=$(wc -l < bench/out/bwameth-missed-by-bsmap.txt)
-          bwsec=$(cat bench/out/bwameth.seconds.txt)
-          bisec=$(cat bench/out/bismark.seconds.txt)
-          bssec=$(cat bench/out/bsmap.seconds.txt)
-          printf 'reads_per_mate=200000\nbwameth_candidate_names=%s\nbismark_candidate_names=%s\nbsmap_candidate_names=%s\nbwameth_missed_by_bismark=%s\nbwameth_missed_by_bsmap=%s\nbwameth_seconds=%s\nbismark_seconds=%s\nbsmap_seconds=%s\n' \
-            "$bw" "$bi" "$bs" "$bimiss" "$bsmiss" "$bwsec" "$bisec" "$bssec" | tee bench/out/summary.txt
-          test "$bimiss" -eq 0
-          test "$bsmiss" -eq 0
+            comm -3 /bench/out/serial4.names.txt /bench/out/parallel2x2.names.txt > /bench/out/serial-vs-2x2.diff.txt
+            comm -3 /bench/out/serial4.names.txt /bench/out/parallel4x1.names.txt > /bench/out/serial-vs-4x1.diff.txt
+            d2=$(wc -l < /bench/out/serial-vs-2x2.diff.txt)
+            d4=$(wc -l < /bench/out/serial-vs-4x1.diff.txt)
+            n=$(wc -l < /bench/out/serial4.names.txt)
+            s2=$(awk -v a="$serial_seconds" -v b="$p2_seconds" '"'"'BEGIN { if (b==0) print "inf"; else printf "%.3f", a/b }'"'"')
+            s4=$(awk -v a="$serial_seconds" -v b="$p4_seconds" '"'"'BEGIN { if (b==0) print "inf"; else printf "%.3f", a/b }'"'"')
+            {
+              echo "input_pairs=1000000"
+              echo "chunk_pairs=250000"
+              echo "validated_screen_context_bp_each_side=2000"
+              echo "max_edit_distance=0.20"
+              echo "candidate_qnames=$n"
+              echo "serial_1x4_seconds=$serial_seconds"
+              echo "parallel_2x2_seconds=$p2_seconds"
+              echo "parallel_4x1_seconds=$p4_seconds"
+              echo "speedup_2x2_vs_serial=$s2"
+              echo "speedup_4x1_vs_serial=$s4"
+              echo "candidate_diff_2x2_vs_serial=$d2"
+              echo "candidate_diff_4x1_vs_serial=$d4"
+            } | tee /bench/out/summary.txt
+            test "$d2" -eq 0
+            test "$d4" -eq 0
+          '
 
       - name: Upload benchmark evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bounty1-wgbs-prefilter-benchmark
+          name: bounty1-wgbs-abismal-parallelism-benchmark
           path: |
             bench/out/summary.txt
-            bench/out/*.seconds.txt
-            bench/out/*missed*.txt
+            bench/out/*.diff.txt
             bench/out/*.stderr.log
-            bench/out/bsmap.which.log
           if-no-files-found: warn
           retention-days: 14
