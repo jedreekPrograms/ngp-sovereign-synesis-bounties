@@ -2,8 +2,10 @@
 """Stream gzip FASTQ to stdout while validating compressed-source MD5.
 
 Paired reads are emitted interleaved for ``fastp --stdin --interleaved_in``.
-Remote HTTP(S) inputs use curl-backed byte-range resume so repeated premature
-EOFs from CNCB do not force raw FASTQ staging or restart the compressed stream.
+Remote HTTP(S) inputs use bounded parallel curl byte ranges so intermittent
+CNCB connection truncation does not force raw FASTQ staging or a restart from
+byte zero. Ranges are reassembled strictly in source order and the complete
+compressed object is still validated against its published MD5 before success.
 """
 
 import argparse
@@ -13,34 +15,52 @@ import shutil
 import subprocess
 import sys
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from pathlib import Path
 
 REMOTE_SCHEMES = {"http", "https"}
+RANGE_CHUNK_BYTES = 16 * 1024 * 1024
+RANGE_PREFETCH = 3
+RANGE_RETRIES = 30
 
 
-class CurlResumableHTTPReader:
-    """Sequential HTTP reader that restarts curl at the next compressed byte."""
+class ParallelCurlRangeReader:
+    """Ordered, bounded-memory HTTP reader backed by parallel curl ranges."""
 
-    def __init__(self, source, timeout=120, max_retries=2000, retry_delay=1):
+    def __init__(
+        self,
+        source,
+        timeout=120,
+        chunk_size=RANGE_CHUNK_BYTES,
+        prefetch=RANGE_PREFETCH,
+        max_retries=RANGE_RETRIES,
+        retry_delay=1,
+    ):
         self.source = source
         self.timeout = timeout
+        self.chunk_size = chunk_size
+        self.prefetch = prefetch
         self.max_retries = max_retries
         self.retry_delay = retry_delay
-        self.offset = 0
         self.total_size = self._probe_total_size()
-        self.retries = 0
-        self.proc = None
-        self._start(0)
+        self.chunk_count = (self.total_size + self.chunk_size - 1) // self.chunk_size
+        self.executor = ThreadPoolExecutor(max_workers=self.prefetch)
+        self.pending = {}
+        self.next_submit = 0
+        self.next_consume = 0
+        self.buffer = bytearray()
+        self.offset = 0
+        self.closed = False
+        self._fill_prefetch()
 
     def _probe_total_size(self):
         request = urllib.request.Request(
             self.source,
             headers={
-                "User-Agent": "bounty1-fastq-stream/3.0",
+                "User-Agent": "bounty1-fastq-stream/4.0",
                 "Range": "bytes=0-0",
             },
         )
@@ -57,7 +77,12 @@ class CurlResumableHTTPReader:
                 raise IOError(f"invalid HTTP object size: {content_range!r}")
             return int(total)
 
-    def _curl_command(self, offset):
+    def _range_bounds(self, index):
+        start = index * self.chunk_size
+        end = min(self.total_size - 1, start + self.chunk_size - 1)
+        return start, end
+
+    def _curl_command(self, start, end):
         connect_timeout = max(5, min(30, self.timeout))
         return [
             "curl",
@@ -73,85 +98,108 @@ class CurlResumableHTTPReader:
             "--speed-limit",
             "1024",
             "--range",
-            f"{offset}-",
+            f"{start}-{end}",
             "--user-agent",
-            "bounty1-fastq-stream/3.0",
+            "bounty1-fastq-stream/4.0",
             self.source,
         ]
 
-    def _finish_process(self):
-        if self.proc is None:
-            return 0, ""
-        if self.proc.stdout is not None:
-            self.proc.stdout.close()
-        stderr = b""
-        if self.proc.stderr is not None:
-            stderr = self.proc.stderr.read()
-            self.proc.stderr.close()
-        rc = self.proc.wait()
-        self.proc = None
-        return rc, stderr.decode("utf-8", errors="replace").strip()
+    def _fetch_chunk(self, index):
+        start, end = self._range_bounds(index)
+        expected = end - start + 1
+        last_error = None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                completed = subprocess.run(  # noqa: S603
+                    self._curl_command(start, end),
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=max(300, self.timeout * 3),
+                )
+                if completed.returncode != 0:
+                    raise IOError(
+                        f"curl exit={completed.returncode}: "
+                        f"{completed.stderr.decode('utf-8', errors='replace').strip()}"
+                    )
+                if len(completed.stdout) != expected:
+                    raise IOError(
+                        f"range length mismatch {start}-{end}: "
+                        f"expected {expected}, got {len(completed.stdout)}"
+                    )
+                return completed.stdout
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                last_error = exc
+                print(
+                    f"range retry {attempt}/{self.max_retries}: {self.source} "
+                    f"bytes={start}-{end}: {exc}",
+                    file=sys.stderr,
+                )
+                if attempt < self.max_retries:
+                    time.sleep(self.retry_delay)
+        raise IOError(
+            f"failed HTTP range {start}-{end} after {self.max_retries} attempts"
+        ) from last_error
 
-    def _start(self, offset):
-        if self.proc is not None:
-            self.proc.kill()
-            self._finish_process()
-        self.proc = subprocess.Popen(  # noqa: S603
-            self._curl_command(offset),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        if self.proc.stdout is None:
-            raise RuntimeError("curl stdout pipe was not created")
+    def _fill_prefetch(self):
+        while len(self.pending) < self.prefetch and self.next_submit < self.chunk_count:
+            index = self.next_submit
+            self.pending[index] = self.executor.submit(self._fetch_chunk, index)
+            self.next_submit += 1
 
-    def _resume(self, reason):
-        self.retries += 1
-        if self.retries > self.max_retries:
-            raise IOError(
-                f"exhausted {self.max_retries} curl resume attempts for "
-                f"{self.source} at byte {self.offset}"
-            ) from reason
-        print(
-            f"curl resume {self.retries}/{self.max_retries}: {self.source} "
-            f"at compressed byte {self.offset}: {reason}",
-            file=sys.stderr,
-        )
-        time.sleep(self.retry_delay)
-        self._start(self.offset)
+    def _consume_next_chunk(self):
+        if self.next_consume >= self.chunk_count:
+            return False
+        future = self.pending.pop(self.next_consume, None)
+        if future is None:
+            raise RuntimeError(f"missing prefetched HTTP range {self.next_consume}")
+        data = future.result()
+        self.buffer.extend(data)
+        self.next_consume += 1
+        self._fill_prefetch()
+        return True
 
     def read(self, size=-1):
-        while True:
-            if self.proc is None or self.proc.stdout is None:
-                raise RuntimeError("curl reader is closed")
-            data = self.proc.stdout.read(size)
-            if data:
-                self.offset += len(data)
-                return data
+        if self.closed:
+            raise RuntimeError("HTTP range reader is closed")
+        if size is None or size < 0:
+            while self._consume_next_chunk():
+                pass
+            data = bytes(self.buffer)
+            self.buffer.clear()
+            self.offset += len(data)
+            return data
+        if size == 0:
+            return b""
 
-            rc, stderr = self._finish_process()
-            if self.offset >= self.total_size:
-                if self.offset != self.total_size:
-                    raise IOError(
-                        "HTTP stream exceeded expected size: "
-                        f"{self.offset} > {self.total_size}"
-                    )
-                if rc != 0:
-                    raise IOError(
-                        f"curl exited {rc} after complete object: {stderr or 'no stderr'}"
-                    )
-                return b""
+        while len(self.buffer) < size and self.next_consume < self.chunk_count:
+            self._consume_next_chunk()
 
-            self._resume(
-                EOFError(
-                    f"premature curl EOF at byte {self.offset} of "
-                    f"{self.total_size}; rc={rc}; {stderr or 'no stderr'}"
+        if not self.buffer:
+            if self.offset != self.total_size:
+                raise IOError(
+                    f"HTTP stream ended at {self.offset} of {self.total_size} compressed bytes"
                 )
+            return b""
+
+        take = min(size, len(self.buffer))
+        data = bytes(self.buffer[:take])
+        del self.buffer[:take]
+        self.offset += len(data)
+        if self.offset > self.total_size:
+            raise IOError(
+                f"HTTP stream exceeded expected size: {self.offset} > {self.total_size}"
             )
+        return data
 
     def close(self):
-        if self.proc is not None:
-            self.proc.kill()
-            self._finish_process()
+        if self.closed:
+            return
+        self.closed = True
+        for future in self.pending.values():
+            future.cancel()
+        self.pending.clear()
+        self.executor.shutdown(wait=False, cancel_futures=True)
 
     def __enter__(self):
         return self
@@ -190,11 +238,11 @@ def open_source(source, timeout):
     if parsed.scheme in REMOTE_SCHEMES:
         if shutil.which("curl") is None:
             raise RuntimeError("curl is required for resumable HTTP FASTQ streaming")
-        return CurlResumableHTTPReader(source, timeout=timeout)
+        return ParallelCurlRangeReader(source, timeout=timeout)
     if parsed.scheme == "ftp":
         request = urllib.request.Request(
             source,
-            headers={"User-Agent": "bounty1-fastq-stream/3.0"},
+            headers={"User-Agent": "bounty1-fastq-stream/4.0"},
         )
         return urllib.request.urlopen(request, timeout=timeout)  # nosec B310
     if parsed.scheme:
