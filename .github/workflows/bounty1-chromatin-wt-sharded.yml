@@ -1,0 +1,289 @@
+name: Bounty 1 chromatin WT sharded recovery
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/bounty1-chromatin-wt-sharded.yml'
+  push:
+    branches: [bounty-1-real-pipeline]
+    paths:
+      - '.github/workflows/bounty1-chromatin-wt-sharded.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bounty1-chromatin-wt-sharded
+  cancel-in-progress: false
+
+env:
+  CONDITION: WT
+  INDEX_URL: https://genome-idx.s3.amazonaws.com/bt/hg19.zip
+  INDEX_MD5_URL: https://genome-idx.s3.amazonaws.com/bt/hg19.md5
+
+jobs:
+  input:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Load pinned analysis image
+        uses: docker/build-push-action@v6
+        with:
+          context: bounty1
+          load: true
+          pull: true
+          tags: bounty1-pace:chromatin-wt-sharded
+          cache-from: type=gha,scope=bounty1-docker
+          cache-to: type=gha,mode=max,scope=bounty1-docker
+
+      - name: Resolve matched WT INPUT
+        run: |
+          set -euo pipefail
+          mkdir -p chromatin/{ref,source,work,qc,results,input}
+          python3 - <<'PY' >> "$GITHUB_ENV"
+          import csv
+          rows = list(csv.DictReader(open('bounty1/resources/chip_inputs.csv', newline='', encoding='utf-8')))
+          rows = [r for r in rows if r['condition'] == 'WT']
+          if len(rows) != 1:
+              raise SystemExit(f'expected one WT INPUT, got {len(rows)}')
+          r = rows[0]
+          print(f"SAMPLE={r['sample_id']}")
+          print(f"R1={r['fastq_1']}")
+          print(f"R2={r['fastq_2']}")
+          print(f"MD5_R1={r['read1_md5']}")
+          print(f"MD5_R2={r['read2_md5']}")
+          PY
+
+      - name: Download checksum-verified prebuilt UCSC hg19 Bowtie2 index
+        run: |
+          set -euo pipefail
+          cd chromatin/ref
+          curl -fL --retry 20 --retry-delay 5 --retry-all-errors -o hg19.zip "$INDEX_URL"
+          curl -fL --retry 20 --retry-delay 5 --retry-all-errors -o hg19.md5 "$INDEX_MD5_URL"
+          md5sum -c hg19.md5
+          unzip -q hg19.zip
+          test -s hg19.1.bt2
+          test -s hg19.rev.2.bt2
+          sha256sum hg19*.bt2 > ../qc/hg19-index.SHA256SUMS
+
+      - name: Download WT INPUT once, align, deduplicate and checkpoint MAPQ30 BAM
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -e SAMPLE -e R1 -e R2 -e MD5_R1 -e MD5_R2 \
+            -v "$PWD/chromatin:/chromatin" \
+            bounty1-pace:chromatin-wt-sharded bash -lc '
+              set -euo pipefail
+              cd /chromatin/work
+              download_verified() {
+                local url="$1" expected="$2" dest="$3" label="$4"
+                local attempt actual
+                for attempt in 1 2 3 4; do
+                  touch "$dest"
+                  if curl -fL --retry 20 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
+                       --speed-time 120 --speed-limit 1024 -C - -o "$dest" "$url" \
+                       >> "/chromatin/qc/${label}.curl.stdout.log" 2>> "/chromatin/qc/${label}.curl.stderr.log"; then
+                    actual=$(md5sum "$dest" | awk '"'"'{print $1}'"'"')
+                    if [[ "${actual,,}" == "${expected,,}" ]] && gzip -t "$dest"; then
+                      echo "${actual}  ${dest}" > "/chromatin/qc/${label}.source-md5.txt"
+                      return 0
+                    fi
+                  fi
+                  rm -f "$dest"
+                  sleep $((attempt * 10))
+                done
+                return 1
+              }
+              r1=/chromatin/source/${SAMPLE}.R1.fastq.gz
+              r2=/chromatin/source/${SAMPLE}.R2.fastq.gz
+              download_verified "$R1" "$MD5_R1" "$r1" "${SAMPLE}.R1"
+              download_verified "$R2" "$MD5_R2" "$r2" "${SAMPLE}.R2"
+              python3 /work/bin/stream_interleaved_fastq.py --r1-source "$r1" --r2-source "$r2" \
+                --r1-md5 "$MD5_R1" --r2-md5 "$MD5_R2" | \
+              fastp --stdin --interleaved_in --stdout --thread 4 \
+                --json "/chromatin/qc/${SAMPLE}.fastp.json" --html "/chromatin/qc/${SAMPLE}.fastp.html" \
+                2> "/chromatin/qc/${SAMPLE}.fastp.stderr.log" | \
+              bowtie2 --very-sensitive -x /chromatin/ref/hg19 --interleaved - -p 4 \
+                2> "/chromatin/qc/${SAMPLE}.bowtie2.log" | \
+              samtools view -b - | samtools sort -n -@ 4 -m 256M -o ${SAMPLE}.name.bam
+              rm -f "$r1" "$r2"
+              samtools fixmate -m ${SAMPLE}.name.bam ${SAMPLE}.fixmate.bam
+              rm -f ${SAMPLE}.name.bam
+              samtools sort -@ 4 -m 256M -o ${SAMPLE}.position.bam ${SAMPLE}.fixmate.bam
+              rm -f ${SAMPLE}.fixmate.bam
+              samtools markdup -r -@ 4 ${SAMPLE}.position.bam ${SAMPLE}.dedup.bam
+              rm -f ${SAMPLE}.position.bam
+              samtools view -b -q 30 ${SAMPLE}.dedup.bam | samtools sort -@ 4 -m 256M -o /chromatin/input/${SAMPLE}.mapq30.bam
+              rm -f ${SAMPLE}.dedup.bam
+              samtools index /chromatin/input/${SAMPLE}.mapq30.bam
+              samtools quickcheck -v /chromatin/input/${SAMPLE}.mapq30.bam
+              samtools flagstat /chromatin/input/${SAMPLE}.mapq30.bam > /chromatin/qc/${SAMPLE}.flagstat.txt
+              test "$(samtools view -c /chromatin/input/${SAMPLE}.mapq30.bam)" -gt 0
+              samtools view -f 67 -F 2304 -q 30 /chromatin/input/${SAMPLE}.mapq30.bam | \
+                awk '"'"'BEGIN{OFS="\t"} $9 != 0 {p=$4-1;m=$8-1;s=(p<m?p:m);l=($9<0?-$9:$9);e=s+l;if(e>s)print $3,s,e}'"'"' | \
+                gzip -1 > /chromatin/results/${SAMPLE}.fragments.bed.gz
+              gzip -t /chromatin/results/${SAMPLE}.fragments.bed.gz
+              sha256sum /chromatin/input/* /chromatin/results/* > /chromatin/qc/input-checkpoint.SHA256SUMS
+            '
+
+      - name: Upload INPUT checkpoint once
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounty1-chromatin-WT-input-checkpoint
+          path: |
+            chromatin/input
+            chromatin/results
+            chromatin/qc
+          if-no-files-found: error
+          compression-level: 1
+          retention-days: 30
+
+  treatment:
+    needs: input
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        sample:
+          - WT_rep1_H3K9ac
+          - WT_rep2_H3K9ac
+          - WT_rep1_H3K56ac
+          - WT_rep2_H3K56ac
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Load pinned analysis image
+        uses: docker/build-push-action@v6
+        with:
+          context: bounty1
+          load: true
+          pull: true
+          tags: bounty1-pace:chromatin-wt-sharded
+          cache-from: type=gha,scope=bounty1-docker
+
+      - name: Resolve treatment library
+        env:
+          TARGET_SAMPLE: ${{ matrix.sample }}
+        run: |
+          set -euo pipefail
+          mkdir -p chromatin/{ref,source,work,qc,results,input}
+          python3 - <<'PY' >> "$GITHUB_ENV"
+          import csv, os
+          rows = list(csv.DictReader(open('bounty1/resources/samplesheet.csv', newline='', encoding='utf-8')))
+          rows = [r for r in rows if r['sample_id'] == os.environ['TARGET_SAMPLE'] and r['assay'] == 'CHIP']
+          if len(rows) != 1:
+              raise SystemExit(f'expected one row for {os.environ["TARGET_SAMPLE"]}, got {len(rows)}')
+          r = rows[0]
+          print(f"SAMPLE={r['sample_id']}")
+          print(f"R1={r['fastq_1']}")
+          print(f"R2={r['fastq_2']}")
+          print(f"MD5_R1={r['read1_md5']}")
+          print(f"MD5_R2={r['read2_md5']}")
+          print(f"MARK={r['mark']}")
+          PY
+
+      - name: Download INPUT checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          name: bounty1-chromatin-WT-input-checkpoint
+          path: chromatin/checkpoint
+
+      - name: Restore INPUT BAM checkpoint
+        run: |
+          set -euo pipefail
+          find chromatin/checkpoint -maxdepth 3 -type f -print
+          cp chromatin/checkpoint/input/*.bam chromatin/input/
+          cp chromatin/checkpoint/input/*.bai chromatin/input/
+          samtools_bam=$(find chromatin/input -name '*.bam' -print -quit)
+          test -n "$samtools_bam"
+
+      - name: Download checksum-verified prebuilt UCSC hg19 Bowtie2 index
+        run: |
+          set -euo pipefail
+          cd chromatin/ref
+          curl -fL --retry 20 --retry-delay 5 --retry-all-errors -o hg19.zip "$INDEX_URL"
+          curl -fL --retry 20 --retry-delay 5 --retry-all-errors -o hg19.md5 "$INDEX_MD5_URL"
+          md5sum -c hg19.md5
+          unzip -q hg19.zip
+          test -s hg19.1.bt2
+          test -s hg19.rev.2.bt2
+          sha256sum hg19*.bt2 > ../qc/hg19-index.SHA256SUMS
+
+      - name: Align treatment, deduplicate, MAPQ30, call peaks and export fragments
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -e SAMPLE -e R1 -e R2 -e MD5_R1 -e MD5_R2 -e MARK \
+            -v "$PWD/chromatin:/chromatin" \
+            bounty1-pace:chromatin-wt-sharded bash -lc '
+              set -euo pipefail
+              cd /chromatin/work
+              input_bam=$(find /chromatin/input -name "*.mapq30.bam" -print -quit)
+              [[ -n "$input_bam" ]]
+              download_verified() {
+                local url="$1" expected="$2" dest="$3" label="$4"
+                local attempt actual
+                for attempt in 1 2 3 4; do
+                  touch "$dest"
+                  if curl -fL --retry 20 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
+                       --speed-time 120 --speed-limit 1024 -C - -o "$dest" "$url" \
+                       >> "/chromatin/qc/${label}.curl.stdout.log" 2>> "/chromatin/qc/${label}.curl.stderr.log"; then
+                    actual=$(md5sum "$dest" | awk '"'"'{print $1}'"'"')
+                    if [[ "${actual,,}" == "${expected,,}" ]] && gzip -t "$dest"; then return 0; fi
+                  fi
+                  rm -f "$dest"
+                  sleep $((attempt * 10))
+                done
+                return 1
+              }
+              r1=/chromatin/source/${SAMPLE}.R1.fastq.gz
+              r2=/chromatin/source/${SAMPLE}.R2.fastq.gz
+              download_verified "$R1" "$MD5_R1" "$r1" "${SAMPLE}.R1"
+              download_verified "$R2" "$MD5_R2" "$r2" "${SAMPLE}.R2"
+              python3 /work/bin/stream_interleaved_fastq.py --r1-source "$r1" --r2-source "$r2" \
+                --r1-md5 "$MD5_R1" --r2-md5 "$MD5_R2" | \
+              fastp --stdin --interleaved_in --stdout --thread 4 \
+                --json "/chromatin/qc/${SAMPLE}.fastp.json" --html "/chromatin/qc/${SAMPLE}.fastp.html" \
+                2> "/chromatin/qc/${SAMPLE}.fastp.stderr.log" | \
+              bowtie2 --very-sensitive -x /chromatin/ref/hg19 --interleaved - -p 4 \
+                2> "/chromatin/qc/${SAMPLE}.bowtie2.log" | \
+              samtools view -b - | samtools sort -n -@ 4 -m 256M -o ${SAMPLE}.name.bam
+              rm -f "$r1" "$r2"
+              samtools fixmate -m ${SAMPLE}.name.bam ${SAMPLE}.fixmate.bam
+              rm -f ${SAMPLE}.name.bam
+              samtools sort -@ 4 -m 256M -o ${SAMPLE}.position.bam ${SAMPLE}.fixmate.bam
+              rm -f ${SAMPLE}.fixmate.bam
+              samtools markdup -r -@ 4 ${SAMPLE}.position.bam ${SAMPLE}.dedup.bam
+              rm -f ${SAMPLE}.position.bam
+              samtools view -b -q 30 ${SAMPLE}.dedup.bam | samtools sort -@ 4 -m 256M -o ${SAMPLE}.mapq30.bam
+              rm -f ${SAMPLE}.dedup.bam
+              samtools index ${SAMPLE}.mapq30.bam
+              samtools quickcheck -v ${SAMPLE}.mapq30.bam "$input_bam"
+              macs3 callpeak -t ${SAMPLE}.mapq30.bam -c "$input_bam" -f BAMPE -g hs \
+                -n ${SAMPLE}_hg19_full -q 0.01 --keep-dup all -B \
+                > /chromatin/qc/${SAMPLE}.macs3.stdout.log 2> /chromatin/qc/${SAMPLE}.macs3.stderr.log
+              test -s ${SAMPLE}_hg19_full_peaks.narrowPeak
+              cp ${SAMPLE}_hg19_full_peaks.narrowPeak /chromatin/results/
+              wc -l ${SAMPLE}_hg19_full_peaks.narrowPeak > /chromatin/results/${SAMPLE}.peak-count.txt
+              samtools view -f 67 -F 2304 -q 30 ${SAMPLE}.mapq30.bam | \
+                awk '"'"'BEGIN{OFS="\t"} $9 != 0 {p=$4-1;m=$8-1;s=(p<m?p:m);l=($9<0?-$9:$9);e=s+l;if(e>s)print $3,s,e}'"'"' | \
+                gzip -1 > /chromatin/results/${SAMPLE}.fragments.bed.gz
+              gzip -t /chromatin/results/${SAMPLE}.fragments.bed.gz
+              sha256sum /chromatin/results/* > /chromatin/qc/results.SHA256SUMS
+            '
+
+      - name: Upload treatment evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounty1-chromatin-WT-${{ matrix.sample }}
+          path: |
+            chromatin/results
+            chromatin/qc
+          if-no-files-found: error
+          compression-level: 1
+          retention-days: 30
