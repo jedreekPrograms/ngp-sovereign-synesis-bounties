@@ -72,6 +72,8 @@ jobs:
             Rscript /work/bin/export_pace_regions.R --output /bench/ref/pace.bed --flank 500
           '
 
+          # Production Abismal screening uses total +/-2 kb context around each
+          # DunedinPACE probe. pace.bed already contains +/-500 bp, so add 1500 bp.
           python3 - <<'PY'
           from collections import defaultdict
           from pathlib import Path
@@ -79,7 +81,7 @@ jobs:
           by=defaultdict(list)
           for line in src.read_text().splitlines():
               if not line or line.startswith('#'): continue
-              f=line.split('\t'); by[f[0]].append((max(0,int(f[1])-500),int(f[2])+500))
+              f=line.split('\t'); by[f[0]].append((max(0,int(f[1])-1500),int(f[2])+1500))
           with dst.open('w') as out:
               for chrom in sorted(by):
                   merged=[]
@@ -216,7 +218,7 @@ jobs:
           m25miss=$(wc -l < bench/out/truth-missed-by-abismal-m25.txt)
           m30miss=$(wc -l < bench/out/truth-missed-by-abismal-m30.txt)
 
-          printf 'reads_per_mate=100000\nfull_hg19_mapq30_pace_truth=%s\nbwameth_screen_candidates=%s\ntruth_missed_by_bwameth_screen=%s\nbwameth_screen_seconds=%s\nabismal_ambig_candidates=%s\ntruth_missed_by_abismal_ambig=%s\nabismal_ambig_seconds=%s\nabismal_m15_candidates=%s\ntruth_missed_by_abismal_m15=%s\nabismal_m15_seconds=%s\nabismal_m20_candidates=%s\ntruth_missed_by_abismal_m20=%s\nabismal_m20_seconds=%s\nabismal_m25_candidates=%s\ntruth_missed_by_abismal_m25=%s\nabismal_m25_seconds=%s\nabismal_m30_candidates=%s\ntruth_missed_by_abismal_m30=%s\nabismal_m30_seconds=%s\ntruth_seconds=%s\n' \
+          printf 'reads_per_mate=100000\nscreen_context_bp=2000\nfull_hg19_mapq30_pace_truth=%s\nbwameth_screen_candidates=%s\ntruth_missed_by_bwameth_screen=%s\nbwameth_screen_seconds=%s\nabismal_ambig_candidates=%s\ntruth_missed_by_abismal_ambig=%s\nabismal_ambig_seconds=%s\nabismal_m15_candidates=%s\ntruth_missed_by_abismal_m15=%s\nabismal_m15_seconds=%s\nabismal_m20_candidates=%s\ntruth_missed_by_abismal_m20=%s\nabismal_m20_seconds=%s\nabismal_m25_candidates=%s\ntruth_missed_by_abismal_m25=%s\nabismal_m25_seconds=%s\nabismal_m30_candidates=%s\ntruth_missed_by_abismal_m30=%s\nabismal_m30_seconds=%s\ntruth_seconds=%s\n' \
             "$truth" "$bw" "$bwmiss" "$(cat bench/out/bwameth-screen.seconds.txt)" \
             "$ambig" "$ambigmiss" "$(cat bench/out/abismal-ambig.seconds.txt)" \
             "$m15" "$m15miss" "$(cat bench/out/abismal-m15.seconds.txt)" \
@@ -226,7 +228,8 @@ jobs:
             "$(cat bench/out/truth.seconds.txt)" | tee bench/out/summary.txt
 
           test "$bwmiss" -eq 0
-          test "$m30miss" -eq 0
+          # Production uses Abismal -a -m 0.20 on the total +/-2 kb screen.
+          test "$m20miss" -eq 0
 
       - name: Upload benchmark evidence
         if: always()
