@@ -63,10 +63,18 @@ jobs:
           cd chromatin/ref
           curl -fL --retry 20 --retry-delay 5 --retry-all-errors -o hg19.zip "$INDEX_URL"
           curl -fL --retry 20 --retry-delay 5 --retry-all-errors -o hg19.md5 "$INDEX_MD5_URL"
-          md5sum -c hg19.md5
+          expected_zip=$(awk '$2 ~ /(^|\/)hg19\.zip$/ {print $1; exit}' hg19.md5)
+          test "${#expected_zip}" -eq 32
+          actual_zip=$(md5sum hg19.zip | awk '{print $1}')
+          test "${actual_zip,,}" = "${expected_zip,,}"
           unzip -q hg19.zip
-          test -s hg19.1.bt2
-          test -s hg19.rev.2.bt2
+          for file in hg19.1.bt2 hg19.2.bt2 hg19.3.bt2 hg19.4.bt2 hg19.rev.1.bt2 hg19.rev.2.bt2; do
+            test -s "$file"
+            expected=$(awk -v f="$file" '$2 ~ ("(^|/)" f "$") {print $1; exit}' hg19.md5)
+            test "${#expected}" -eq 32
+            actual=$(md5sum "$file" | awk '{print $1}')
+            test "${actual,,}" = "${expected,,}"
+          done
           sha256sum hg19*.bt2 > ../qc/hg19-index.SHA256SUMS
 
       - name: Download WT INPUT once, align, deduplicate and checkpoint MAPQ30 BAM
@@ -208,10 +216,18 @@ jobs:
           cd chromatin/ref
           curl -fL --retry 20 --retry-delay 5 --retry-all-errors -o hg19.zip "$INDEX_URL"
           curl -fL --retry 20 --retry-delay 5 --retry-all-errors -o hg19.md5 "$INDEX_MD5_URL"
-          md5sum -c hg19.md5
+          expected_zip=$(awk '$2 ~ /(^|\/)hg19\.zip$/ {print $1; exit}' hg19.md5)
+          test "${#expected_zip}" -eq 32
+          actual_zip=$(md5sum hg19.zip | awk '{print $1}')
+          test "${actual_zip,,}" = "${expected_zip,,}"
           unzip -q hg19.zip
-          test -s hg19.1.bt2
-          test -s hg19.rev.2.bt2
+          for file in hg19.1.bt2 hg19.2.bt2 hg19.3.bt2 hg19.4.bt2 hg19.rev.1.bt2 hg19.rev.2.bt2; do
+            test -s "$file"
+            expected=$(awk -v f="$file" '$2 ~ ("(^|/)" f "$") {print $1; exit}' hg19.md5)
+            test "${#expected}" -eq 32
+            actual=$(md5sum "$file" | awk '{print $1}')
+            test "${actual,,}" = "${expected,,}"
+          done
           sha256sum hg19*.bt2 > ../qc/hg19-index.SHA256SUMS
 
       - name: Align treatment, deduplicate, MAPQ30, call peaks and export fragments
