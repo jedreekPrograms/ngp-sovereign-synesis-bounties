@@ -144,7 +144,7 @@ jobs:
                 -o "$sam" "/bench/chunks/q${chunk}.R1.fastq" "/bench/chunks/q${chunk}.R2.fastq" \
                 2> "$log"
               test -s "$sam"
-              awk -F "\t" '\''!/^@/ { if (and($2,4)==0) { q=$1; sub(/\/[12]$/, "", q); print q } }'\'' "$sam" | LC_ALL=C sort -u > "$names"
+              awk -F "\t" '\''!/^@/ { if (int($2 / 4) % 2 == 0) { q=$1; sub(/\/[12]$/, "", q); print q } }'\'' "$sam" | LC_ALL=C sort -u > "$names"
               test -s "$names"
               rm -f "$sam"
             }
