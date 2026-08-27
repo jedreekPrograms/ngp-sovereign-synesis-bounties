@@ -8,8 +8,9 @@ that class of deadlock without materialising whole cleaned libraries: it writes
 one bounded pair of temporary FASTQ chunks, maps that chunk, emits complete
 candidate pairs to gzip outputs, then deletes the chunk before continuing.
 
-This no-op documentation touch intentionally triggers the direct-source
-streaming WT pilot after retiring the staged-source pilot.
+The chunk size is deliberately large enough to amortize mapper/process startup
+cost while remaining bounded on a GitHub-hosted runner. Candidate semantics are
+unchanged: every mapped pair retained by the validated Abismal screen is emitted.
 """
 
 from __future__ import annotations
@@ -121,6 +122,17 @@ def emit_candidates(
     return emitted
 
 
+def resolve_abismal() -> str:
+    """Resolve the pinned Abismal executable once, not once per chunk."""
+    resolved = subprocess.check_output(
+        ["micromamba", "run", "-n", "abismal", "which", "abismal"],
+        text=True,
+    ).strip()
+    if not resolved:
+        raise RuntimeError("could not resolve Abismal executable")
+    return resolved
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--index", required=True)
@@ -128,7 +140,7 @@ def main() -> int:
     parser.add_argument("--candidate-r1", required=True)
     parser.add_argument("--candidate-r2", required=True)
     parser.add_argument("--workdir", required=True)
-    parser.add_argument("--chunk-pairs", type=int, default=1_000_000)
+    parser.add_argument("--chunk-pairs", type=int, default=4_000_000)
     parser.add_argument("--max-edit-distance", type=float, default=0.20)
     args = parser.parse_args()
 
@@ -144,6 +156,7 @@ def main() -> int:
     total_pairs = 0
     candidate_pairs = 0
     chunk_no = 0
+    abismal_executable = resolve_abismal()
 
     with gzip.open(args.candidate_r1, "wb", compresslevel=1) as r1_candidates, gzip.open(
         args.candidate_r2, "wb", compresslevel=1
@@ -165,11 +178,7 @@ def main() -> int:
                 total_pairs += count
 
                 command = [
-                    "micromamba",
-                    "run",
-                    "-n",
-                    "abismal",
-                    "abismal",
+                    abismal_executable,
                     "map",
                     "-i",
                     args.index,
