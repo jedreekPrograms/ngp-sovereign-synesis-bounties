@@ -24,7 +24,7 @@ jobs:
   wt_rep1_streaming:
     if: github.head_ref == 'bounty-1-real-pipeline'
     runs-on: ubuntu-latest
-    timeout-minutes: 355
+    timeout-minutes: 360
     env:
       SAMPLE_ID: WT_rep1_WGBS
       CONDITION: WT
@@ -104,7 +104,7 @@ jobs:
           cp "shard/out/${SAMPLE_ID}.pace-screen.pipeline-status.txt" checkpoint-candidate/
           (cd checkpoint-candidate && sha256sum "${SAMPLE_ID}.candidate.R1.fastq.gz" "${SAMPLE_ID}.candidate.R2.fastq.gz" > SHA256SUMS)
           cat > checkpoint-candidate/checkpoint.json <<EOF
-          {"sample_id":"${SAMPLE_ID}","stage":"candidate","source_r1_md5":"${MD5_R1}","source_r2_md5":"${MD5_R2}","run_accession":"${RUN_ACCESSION}","screen":"Abismal 3.3.0 PACE +/-2 kb -a -m 0.20; resumable direct-source streaming","git_sha":"${GITHUB_SHA}"}
+          {"sample_id":"${SAMPLE_ID}","stage":"candidate","source_r1_md5":"${MD5_R1}","source_r2_md5":"${MD5_R2}","run_accession":"${RUN_ACCESSION}","screen":"Abismal 3.3.0 PACE +/-2 kb -a -m 0.20; resumable direct-source streaming; 4M bounded chunks","git_sha":"${GITHUB_SHA}"}
           EOF
       - uses: actions/upload-artifact@v4
         with:
