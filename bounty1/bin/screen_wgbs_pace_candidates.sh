@@ -13,17 +13,11 @@ set -euo pipefail
 # ~12 s and retaining 22,545 candidate pairs. Wider 5/10 kb variants also had
 # zero misses; +/-2 kb is therefore the smallest validated context.
 #
-# When complete hg19 + official PACE +/-500 bp windows are mounted by either
-# the production cohort (/shard) or local runner (/local), this script derives
-# the validated +/-2 kb screen itself. The passed SCREEN_REFERENCE_FASTA
-# remains a standalone fallback.
-#
-# Abismal requires two mate filenames and can open/read them sequentially, so
-# paired FIFOs can deadlock with an interleaved producer. The cleaned fastp
-# stream is therefore processed in bounded temporary chunks: each chunk is
-# mapped, candidate pairs are appended to gzip outputs, and the chunk is
-# deleted before the next one. Whole cleaned libraries and whole-screen BAMs
-# are never materialised.
+# The optional WGBS_PAIR_START / WGBS_PAIR_COUNT environment variables select
+# a contiguous pair range *after* the source stream. The streamer still reads
+# both complete compressed objects and verifies their published MD5 values, so
+# each resumable segment stays fail-closed. Pair ranges are non-overlapping and
+# may later be concatenated as gzip members before the final full-hg19 stage.
 #
 # Usage:
 #   screen_wgbs_pace_candidates.sh SAMPLE R1 R2 R1_MD5 R2_MD5 \
@@ -42,6 +36,8 @@ r2_md5="${5,,}"
 screen_reference="$6"
 threads="$7"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+pair_start="${WGBS_PAIR_START:-0}"
+pair_count="${WGBS_PAIR_COUNT:-0}"
 
 if [[ -z "$r2_source" ]]; then
   echo "PACE candidate screen requires paired-end WGBS" >&2
@@ -55,16 +51,16 @@ if ! [[ "$threads" =~ ^[0-9]+$ ]] || (( threads < 1 )); then
   echo "THREADS must be a positive integer" >&2
   exit 2
 fi
+if ! [[ "$pair_start" =~ ^[0-9]+$ && "$pair_count" =~ ^[0-9]+$ ]]; then
+  echo "WGBS_PAIR_START and WGBS_PAIR_COUNT must be non-negative integers" >&2
+  exit 2
+fi
 
 fastp_threads="$threads"
 if (( fastp_threads > 2 )); then
   fastp_threads=2
 fi
 
-# Derive the benchmark-validated +/-2 kb context from complete hg19 wherever
-# the current runner mounts it. This prevents local execution from silently
-# falling back to the older +/-1 kb screen that did not achieve zero misses in
-# the full-hg19 truth benchmark.
 ref_root=""
 if [[ -s /shard/ref/hg19.fa && -s /shard/ref/pace.bed ]]; then
   ref_root="/shard/ref"
@@ -82,7 +78,6 @@ import sys
 
 src = Path(sys.argv[1])
 dst = Path(sys.argv[2])
-# pace.bed already carries +/-500 bp; add 1500 bp to obtain +/-2000 total.
 extra = 1500
 by_chrom = defaultdict(list)
 for line in src.read_text(encoding="utf-8").splitlines():
@@ -134,6 +129,31 @@ python3 "${script_dir}/stream_interleaved_fastq.py" \
   --r1-source "$r1_source" --r2-source "$r2_source" \
   --r1-md5 "$r1_md5" --r2-md5 "$r2_md5" \
   2> "${sample_id}.pace-screen.source-stream.log" | \
+python3 -c '
+import sys
+start = int(sys.argv[1])
+count = int(sys.argv[2])
+stop = None if count == 0 else start + count
+src = sys.stdin.buffer
+out = sys.stdout.buffer
+idx = 0
+selected = 0
+while True:
+    lines = [src.readline() for _ in range(8)]
+    if lines[0] == b"":
+        break
+    if any(line == b"" for line in lines):
+        raise SystemExit("truncated interleaved pair while applying pair range")
+    if idx >= start and (stop is None or idx < stop):
+        out.writelines(lines)
+        selected += 1
+    idx += 1
+out.flush()
+print(f"pair-range total={idx} start={start} count={count} selected={selected}", file=sys.stderr)
+if selected == 0:
+    raise SystemExit("pair range selected zero records")
+' "$pair_start" "$pair_count" \
+  2> "${sample_id}.pace-screen.range.stderr.log" | \
 fastp \
   --stdin --interleaved_in --stdout \
   --json "${sample_id}.pace-screen.fastp.json" \
@@ -154,8 +174,11 @@ set -e
 
 {
   echo "stream_interleaved_fastq=${feed_status[0]}"
-  echo "fastp=${feed_status[1]}"
-  echo "chunked_abismal_screen=${feed_status[2]}"
+  echo "pair_range_filter=${feed_status[1]}"
+  echo "fastp=${feed_status[2]}"
+  echo "chunked_abismal_screen=${feed_status[3]}"
+  echo "pair_start=${pair_start}"
+  echo "pair_count=${pair_count}"
 } > "$status_file"
 
 for code in "${feed_status[@]}"; do
