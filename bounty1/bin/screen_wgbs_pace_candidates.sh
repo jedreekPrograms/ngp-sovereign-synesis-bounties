@@ -146,7 +146,7 @@ python3 "${script_dir}/chunked_abismal_screen.py" \
   --candidate-r1 "$candidate_r1" \
   --candidate-r2 "$candidate_r2" \
   --workdir "$workdir" \
-  --chunk-pairs 1000000 \
+  --chunk-pairs 4000000 \
   --max-edit-distance 0.20 \
   2> "${sample_id}.pace-screen.abismal.stderr.log"
 feed_status=("${PIPESTATUS[@]}")
