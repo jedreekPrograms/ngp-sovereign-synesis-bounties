@@ -36,7 +36,7 @@ jobs:
       MD5_R1: 700da70777819f86c98d7665889a329e
       MD5_R2: 65bd9c8f90bc32536ad05a41bb578dd8
       WGBS_PAIR_START: '0'
-      WGBS_PAIR_COUNT: '160000000'
+      WGBS_PAIR_COUNT: '100000000'
     steps:
       - uses: actions/checkout@v4
 
@@ -76,7 +76,7 @@ jobs:
             test -s /shard/ref/pace-screen.fa
           '
 
-      - name: Screen first 160M source pairs with full-source MD5 verification
+      - name: Screen first 100M source pairs with full-source MD5 verification
         run: |
           set -euo pipefail
           docker run --rm \
@@ -109,7 +109,7 @@ jobs:
           cp "shard/out/${SAMPLE_ID}.pace-screen.range.stderr.log" checkpoint-candidate-part1/
           (cd checkpoint-candidate-part1 && sha256sum "${SAMPLE_ID}.candidate.R1.fastq.gz" "${SAMPLE_ID}.candidate.R2.fastq.gz" > SHA256SUMS)
           cat > checkpoint-candidate-part1/checkpoint.json <<EOF
-          {"sample_id":"${SAMPLE_ID}","stage":"candidate-part1","source_pair_start":0,"source_pair_count":160000000,"source_r1_md5":"${MD5_R1}","source_r2_md5":"${MD5_R2}","run_accession":"${RUN_ACCESSION}","screen":"Abismal 3.3.0 PACE +/-2 kb -a -m 0.20; 4M bounded chunks","git_sha":"${GITHUB_SHA}"}
+          {"sample_id":"${SAMPLE_ID}","stage":"candidate-part1","source_pair_start":0,"source_pair_count":100000000,"source_r1_md5":"${MD5_R1}","source_r2_md5":"${MD5_R2}","run_accession":"${RUN_ACCESSION}","screen":"Abismal 3.3.0 PACE +/-2 kb -a -m 0.20; 4M bounded chunks","git_sha":"${GITHUB_SHA}"}
           EOF
 
       - name: Upload part-1 candidate checkpoint
