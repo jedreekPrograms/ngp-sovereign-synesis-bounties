@@ -5,7 +5,7 @@ Run: pytest tests/test_bounty2_physics.py -v
 import json
 import pathlib
 import subprocess
-import time
+
 import pytest
 
 # Physical constants (acceptance criteria)

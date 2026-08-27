@@ -3,12 +3,14 @@ Automated acceptance tests for Bounty #1: ChIP-seq & DunedinPACE Pipeline.
 Run: pytest tests/test_bounty1_pace.py -v
 """
 import json
-import math
 import pathlib
 import subprocess
+
 import pytest
 
-REFERENCE_INTERCEPT = 51.024577
+# Official danbelsky/DunedinPACE model pinned by the Bounty #1 pipeline.
+DUNEDINPACE_COMMIT = "4b569983543e51d1022aecec9a25e694bb3a336a"
+REFERENCE_INTERCEPT = -1.949859
 INTERCEPT_TOLERANCE = 0.001
 MIN_PEARSON_R = 0.92
 
@@ -33,8 +35,9 @@ def manifest():
 def test_dunedinpace_intercept(manifest):
     intercept = manifest["dunedinpace"]["intercept"]
     assert abs(intercept - REFERENCE_INTERCEPT) <= INTERCEPT_TOLERANCE, (
-        f"DunedinPACE intercept {intercept:.6f} deviates from reference "
-        f"{REFERENCE_INTERCEPT} by more than {INTERCEPT_TOLERANCE}"
+        f"DunedinPACE intercept {intercept:.6f} deviates from official pinned-model "
+        f"intercept {REFERENCE_INTERCEPT} by more than {INTERCEPT_TOLERANCE} "
+        f"(danbelsky/DunedinPACE@{DUNEDINPACE_COMMIT})"
     )
 
 

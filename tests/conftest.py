@@ -1,5 +1,6 @@
 """Shared pytest configuration for NGP Sovereign Synesis bounty test suites."""
 import pathlib
+
 import pytest
 
 
