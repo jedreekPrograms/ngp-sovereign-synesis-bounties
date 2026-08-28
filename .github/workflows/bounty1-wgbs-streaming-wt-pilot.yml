@@ -14,15 +14,13 @@ permissions:
   contents: read
   actions: read
 
-# 50M source-pair shards are validated durable checkpoints. Runs 33136621167
-# and 33148538123 completed WT_rep1 ranges 0-50M and 50-100M respectively.
-# Increase CNCB pressure gradually: two independent WGBS shards in parallel,
-# not 16 streams at once. Each shard still reads both complete compressed
-# objects and verifies the published MD5 before its checkpoint is accepted.
+# 50M source-pair shards are validated durable checkpoints. WT_rep1 ranges
+# 0-50M, 50-100M and 100-150M are durable; WT_rep2 0-50M is durable.
+# The two-way round completed cleanly, so increase CNCB pressure gradually to
+# four independent source libraries rather than reading the same FASTQs twice
+# in parallel. Every shard still verifies both complete published source MD5s
+# before its checkpoint is accepted.
 # Do not cancel an expensive active shard when a later branch update arrives.
-# Housekeeping separately prevents duplicate queued runs.
-# Relaunch marker: prior run 33164344812 was cancelled before any jobs existed,
-# so this commit retries only the still-missing WT_rep1 part3 and WT_rep2 part1.
 concurrency:
   group: bounty1-wgbs-v3-wt-pilot-${{ github.ref }}
   cancel-in-progress: false
@@ -32,7 +30,7 @@ jobs:
     if: github.head_ref == 'bounty-1-real-pipeline'
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 4
       matrix:
         include:
           - sample_id: WT_rep1_WGBS
@@ -41,15 +39,33 @@ jobs:
             r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202754/HRR1202754_r2.fq.gz
             md5_r1: 700da70777819f86c98d7665889a329e
             md5_r2: 65bd9c8f90bc32536ad05a41bb578dd8
-            pair_start: '100000000'
+            pair_start: '150000000'
             pair_count: '50000000'
-            part: part3
+            part: part4
           - sample_id: WT_rep2_WGBS
             run_accession: HRR1202755
             r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202755/HRR1202755_f1.fq.gz
             r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202755/HRR1202755_r2.fq.gz
             md5_r1: dcd665da6062db707fd67baa5d110e7d
             md5_r2: c67204ec1ceac450fbc6c80229e0c939
+            pair_start: '50000000'
+            pair_count: '50000000'
+            part: part2
+          - sample_id: SIRT1_rep1_WGBS
+            run_accession: HRR1202740
+            r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202740/HRR1202740_f1.fq.gz
+            r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202740/HRR1202740_r2.fq.gz
+            md5_r1: 3fbf8ee10f5176524a246b707bd5ad7e
+            md5_r2: f0370fe0d201ae32b47150977e1bdc1f
+            pair_start: '0'
+            pair_count: '50000000'
+            part: part1
+          - sample_id: SIRT1_rep2_WGBS
+            run_accession: HRR1202741
+            r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202741/HRR1202741_f1.fq.gz
+            r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202741/HRR1202741_r2.fq.gz
+            md5_r1: f851bf7a62a22e55e4fe798960a424fb
+            md5_r2: f1949646f0fa4f56e3a4f14a2061d1fe
             pair_start: '0'
             pair_count: '50000000'
             part: part1
