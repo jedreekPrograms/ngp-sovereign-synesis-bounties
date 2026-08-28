@@ -15,20 +15,17 @@ permissions:
   actions: read
 
 # The monolithic prefilter repeatedly exhausted the six-hour hosted-runner
-# budget before actions/upload-artifact could run. This pilot deliberately
-# checkpoints a bounded, non-overlapping prefix first. A follow-up run consumes
-# the complementary suffix and only then concatenates candidate gzip members
-# for complete-hg19/MAPQ30/dedup/MethylDackel processing.
-#
-# 160M and 100M source-pair shards both exhausted the runner budget before the
-# checkpoint step. 50M is deliberately conservative (~half the measured 100M
-# work) so upload-artifact has a large safety margin even with CNCB variance.
+# budget before actions/upload-artifact could run. The validated 50M shard size
+# completed with a durable checkpoint in run 33136621167. This follow-up consumes
+# the next non-overlapping 50M source pairs. Existing part-1 artifacts are never
+# overwritten; later stages concatenate verified candidate gzip members before
+# complete-hg19/MAPQ30/dedup/MethylDackel processing.
 concurrency:
   group: bounty1-wgbs-v3-wt-pilot-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  wt_rep1_candidate_part1:
+  wt_rep1_candidate_part2:
     if: github.head_ref == 'bounty-1-real-pipeline'
     runs-on: ubuntu-latest
     timeout-minutes: 360
@@ -39,7 +36,7 @@ jobs:
       R2_URL: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202754/HRR1202754_r2.fq.gz
       MD5_R1: 700da70777819f86c98d7665889a329e
       MD5_R2: 65bd9c8f90bc32536ad05a41bb578dd8
-      WGBS_PAIR_START: '0'
+      WGBS_PAIR_START: '50000000'
       WGBS_PAIR_COUNT: '50000000'
     steps:
       - uses: actions/checkout@v4
@@ -80,7 +77,7 @@ jobs:
             test -s /shard/ref/pace-screen.fa
           '
 
-      - name: Screen first 50M source pairs with full-source MD5 verification
+      - name: Screen source pairs 50M-100M with full-source MD5 verification
         run: |
           set -euo pipefail
           docker run --rm \
@@ -102,34 +99,34 @@ jobs:
           grep -q '^fastp=0$' "shard/out/${SAMPLE_ID}.pace-screen.pipeline-status.txt"
           grep -q '^chunked_abismal_screen=0$' "shard/out/${SAMPLE_ID}.pace-screen.pipeline-status.txt"
 
-      - name: Build durable part-1 candidate checkpoint
+      - name: Build durable part-2 candidate checkpoint
         run: |
           set -euo pipefail
-          mkdir -p checkpoint-candidate-part1
-          cp "shard/out/${SAMPLE_ID}.candidate.R1.fastq.gz" checkpoint-candidate-part1/
-          cp "shard/out/${SAMPLE_ID}.candidate.R2.fastq.gz" checkpoint-candidate-part1/
-          cp "shard/out/${SAMPLE_ID}.candidate-pair-count.txt" checkpoint-candidate-part1/
-          cp "shard/out/${SAMPLE_ID}.pace-screen.pipeline-status.txt" checkpoint-candidate-part1/
-          cp "shard/out/${SAMPLE_ID}.pace-screen.range.stderr.log" checkpoint-candidate-part1/
-          (cd checkpoint-candidate-part1 && sha256sum "${SAMPLE_ID}.candidate.R1.fastq.gz" "${SAMPLE_ID}.candidate.R2.fastq.gz" > SHA256SUMS)
-          cat > checkpoint-candidate-part1/checkpoint.json <<EOF
-          {"sample_id":"${SAMPLE_ID}","stage":"candidate-part1","source_pair_start":0,"source_pair_count":50000000,"source_r1_md5":"${MD5_R1}","source_r2_md5":"${MD5_R2}","run_accession":"${RUN_ACCESSION}","screen":"Abismal 3.3.0 PACE +/-2 kb -a -m 0.20; 4M bounded chunks","git_sha":"${GITHUB_SHA}"}
+          mkdir -p checkpoint-candidate-part2
+          cp "shard/out/${SAMPLE_ID}.candidate.R1.fastq.gz" checkpoint-candidate-part2/
+          cp "shard/out/${SAMPLE_ID}.candidate.R2.fastq.gz" checkpoint-candidate-part2/
+          cp "shard/out/${SAMPLE_ID}.candidate-pair-count.txt" checkpoint-candidate-part2/
+          cp "shard/out/${SAMPLE_ID}.pace-screen.pipeline-status.txt" checkpoint-candidate-part2/
+          cp "shard/out/${SAMPLE_ID}.pace-screen.range.stderr.log" checkpoint-candidate-part2/
+          (cd checkpoint-candidate-part2 && sha256sum "${SAMPLE_ID}.candidate.R1.fastq.gz" "${SAMPLE_ID}.candidate.R2.fastq.gz" > SHA256SUMS)
+          cat > checkpoint-candidate-part2/checkpoint.json <<EOF
+          {"sample_id":"${SAMPLE_ID}","stage":"candidate-part2","source_pair_start":50000000,"source_pair_count":50000000,"source_r1_md5":"${MD5_R1}","source_r2_md5":"${MD5_R2}","run_accession":"${RUN_ACCESSION}","screen":"Abismal 3.3.0 PACE +/-2 kb -a -m 0.20; 4M bounded chunks","git_sha":"${GITHUB_SHA}"}
           EOF
 
-      - name: Upload part-1 candidate checkpoint
+      - name: Upload part-2 candidate checkpoint
         uses: actions/upload-artifact@v4
         with:
-          name: bounty1-wgbs-v3-${{ env.SAMPLE_ID }}-candidate-part1
-          path: checkpoint-candidate-part1
+          name: bounty1-wgbs-v3-${{ env.SAMPLE_ID }}-candidate-part2
+          path: checkpoint-candidate-part2
           if-no-files-found: error
-          overwrite: true
+          overwrite: false
           retention-days: 30
 
       - name: Upload compact diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: bounty1-wgbs-segmented-${{ env.SAMPLE_ID }}-part1-diagnostics
+          name: bounty1-wgbs-segmented-${{ env.SAMPLE_ID }}-part2-diagnostics
           path: |
             shard/qc
             shard/out/*.log
