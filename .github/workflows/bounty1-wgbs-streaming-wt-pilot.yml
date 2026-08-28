@@ -14,30 +14,53 @@ permissions:
   contents: read
   actions: read
 
-# The monolithic prefilter repeatedly exhausted the six-hour hosted-runner
-# budget before actions/upload-artifact could run. The validated 50M shard size
-# completed with a durable checkpoint in run 33136621167. This follow-up consumes
-# the next non-overlapping 50M source pairs. Existing part-1 artifacts are never
-# overwritten; later stages concatenate verified candidate gzip members before
-# complete-hg19/MAPQ30/dedup/MethylDackel processing.
+# 50M source-pair shards are validated durable checkpoints. Runs 33136621167
+# and 33148538123 completed WT_rep1 ranges 0-50M and 50-100M respectively.
+# Increase CNCB pressure gradually: two independent WGBS shards in parallel,
+# not 16 streams at once. Each shard still reads both complete compressed
+# objects and verifies the published MD5 before its checkpoint is accepted.
 concurrency:
   group: bounty1-wgbs-v3-wt-pilot-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  wt_rep1_candidate_part2:
+  candidate_shard:
     if: github.head_ref == 'bounty-1-real-pipeline'
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - sample_id: WT_rep1_WGBS
+            run_accession: HRR1202754
+            r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202754/HRR1202754_f1.fq.gz
+            r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202754/HRR1202754_r2.fq.gz
+            md5_r1: 700da70777819f86c98d7665889a329e
+            md5_r2: 65bd9c8f90bc32536ad05a41bb578dd8
+            pair_start: '100000000'
+            pair_count: '50000000'
+            part: part3
+          - sample_id: WT_rep2_WGBS
+            run_accession: HRR1202755
+            r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202755/HRR1202755_f1.fq.gz
+            r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202755/HRR1202755_r2.fq.gz
+            md5_r1: dcd665da6062db707fd67baa5d110e7d
+            md5_r2: c67204ec1ceac450fbc6c80229e0c939
+            pair_start: '0'
+            pair_count: '50000000'
+            part: part1
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
-      SAMPLE_ID: WT_rep1_WGBS
-      RUN_ACCESSION: HRR1202754
-      R1_URL: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202754/HRR1202754_f1.fq.gz
-      R2_URL: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202754/HRR1202754_r2.fq.gz
-      MD5_R1: 700da70777819f86c98d7665889a329e
-      MD5_R2: 65bd9c8f90bc32536ad05a41bb578dd8
-      WGBS_PAIR_START: '50000000'
-      WGBS_PAIR_COUNT: '50000000'
+      SAMPLE_ID: ${{ matrix.sample_id }}
+      RUN_ACCESSION: ${{ matrix.run_accession }}
+      R1_URL: ${{ matrix.r1_url }}
+      R2_URL: ${{ matrix.r2_url }}
+      MD5_R1: ${{ matrix.md5_r1 }}
+      MD5_R2: ${{ matrix.md5_r2 }}
+      WGBS_PAIR_START: ${{ matrix.pair_start }}
+      WGBS_PAIR_COUNT: ${{ matrix.pair_count }}
+      PART: ${{ matrix.part }}
     steps:
       - uses: actions/checkout@v4
 
@@ -77,7 +100,7 @@ jobs:
             test -s /shard/ref/pace-screen.fa
           '
 
-      - name: Screen source pairs 50M-100M with full-source MD5 verification
+      - name: Screen non-overlapping source-pair shard with full-source MD5 verification
         run: |
           set -euo pipefail
           docker run --rm \
@@ -99,25 +122,26 @@ jobs:
           grep -q '^fastp=0$' "shard/out/${SAMPLE_ID}.pace-screen.pipeline-status.txt"
           grep -q '^chunked_abismal_screen=0$' "shard/out/${SAMPLE_ID}.pace-screen.pipeline-status.txt"
 
-      - name: Build durable part-2 candidate checkpoint
+      - name: Build durable candidate checkpoint
         run: |
           set -euo pipefail
-          mkdir -p checkpoint-candidate-part2
-          cp "shard/out/${SAMPLE_ID}.candidate.R1.fastq.gz" checkpoint-candidate-part2/
-          cp "shard/out/${SAMPLE_ID}.candidate.R2.fastq.gz" checkpoint-candidate-part2/
-          cp "shard/out/${SAMPLE_ID}.candidate-pair-count.txt" checkpoint-candidate-part2/
-          cp "shard/out/${SAMPLE_ID}.pace-screen.pipeline-status.txt" checkpoint-candidate-part2/
-          cp "shard/out/${SAMPLE_ID}.pace-screen.range.stderr.log" checkpoint-candidate-part2/
-          (cd checkpoint-candidate-part2 && sha256sum "${SAMPLE_ID}.candidate.R1.fastq.gz" "${SAMPLE_ID}.candidate.R2.fastq.gz" > SHA256SUMS)
-          cat > checkpoint-candidate-part2/checkpoint.json <<EOF
-          {"sample_id":"${SAMPLE_ID}","stage":"candidate-part2","source_pair_start":50000000,"source_pair_count":50000000,"source_r1_md5":"${MD5_R1}","source_r2_md5":"${MD5_R2}","run_accession":"${RUN_ACCESSION}","screen":"Abismal 3.3.0 PACE +/-2 kb -a -m 0.20; 4M bounded chunks","git_sha":"${GITHUB_SHA}"}
+          checkpoint="checkpoint-candidate-${PART}"
+          mkdir -p "$checkpoint"
+          cp "shard/out/${SAMPLE_ID}.candidate.R1.fastq.gz" "$checkpoint/"
+          cp "shard/out/${SAMPLE_ID}.candidate.R2.fastq.gz" "$checkpoint/"
+          cp "shard/out/${SAMPLE_ID}.candidate-pair-count.txt" "$checkpoint/"
+          cp "shard/out/${SAMPLE_ID}.pace-screen.pipeline-status.txt" "$checkpoint/"
+          cp "shard/out/${SAMPLE_ID}.pace-screen.range.stderr.log" "$checkpoint/"
+          (cd "$checkpoint" && sha256sum "${SAMPLE_ID}.candidate.R1.fastq.gz" "${SAMPLE_ID}.candidate.R2.fastq.gz" > SHA256SUMS)
+          cat > "$checkpoint/checkpoint.json" <<EOF
+          {"sample_id":"${SAMPLE_ID}","stage":"candidate-${PART}","source_pair_start":${WGBS_PAIR_START},"source_pair_count":${WGBS_PAIR_COUNT},"source_r1_md5":"${MD5_R1}","source_r2_md5":"${MD5_R2}","run_accession":"${RUN_ACCESSION}","screen":"Abismal 3.3.0 PACE +/-2 kb -a -m 0.20; 4M bounded chunks","git_sha":"${GITHUB_SHA}"}
           EOF
 
-      - name: Upload part-2 candidate checkpoint
+      - name: Upload durable candidate checkpoint
         uses: actions/upload-artifact@v4
         with:
-          name: bounty1-wgbs-v3-${{ env.SAMPLE_ID }}-candidate-part2
-          path: checkpoint-candidate-part2
+          name: bounty1-wgbs-v3-${{ env.SAMPLE_ID }}-candidate-${{ env.PART }}
+          path: checkpoint-candidate-${{ env.PART }}
           if-no-files-found: error
           overwrite: false
           retention-days: 30
@@ -126,7 +150,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: bounty1-wgbs-segmented-${{ env.SAMPLE_ID }}-part2-diagnostics
+          name: bounty1-wgbs-segmented-${{ env.SAMPLE_ID }}-${{ env.PART }}-diagnostics
           path: |
             shard/qc
             shard/out/*.log
