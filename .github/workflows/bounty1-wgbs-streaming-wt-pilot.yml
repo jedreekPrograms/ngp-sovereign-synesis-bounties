@@ -21,6 +21,8 @@ permissions:
 # objects and verifies the published MD5 before its checkpoint is accepted.
 # Do not cancel an expensive active shard when a later branch update arrives.
 # Housekeeping separately prevents duplicate queued runs.
+# Relaunch marker: prior run 33164344812 was cancelled before any jobs existed,
+# so this commit retries only the still-missing WT_rep1 part3 and WT_rep2 part1.
 concurrency:
   group: bounty1-wgbs-v3-wt-pilot-${{ github.ref }}
   cancel-in-progress: false
