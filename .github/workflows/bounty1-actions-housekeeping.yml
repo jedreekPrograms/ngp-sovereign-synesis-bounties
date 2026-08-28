@@ -9,6 +9,8 @@ on:
       - '.github/workflows/bounty1-full-chromatin-benchmark.yml'
       - '.github/workflows/bounty1-wgbs-cohort.yml'
       - '.github/workflows/bounty1-wgbs-cohort-v2.yml'
+      - '.github/workflows/bounty1-wgbs-streaming-wt-pilot.yml'
+      - '.github/workflows/bounty1-chromatin-wt-sharded.yml'
 
 permissions:
   actions: write
@@ -85,11 +87,10 @@ jobs:
             done
           }
 
-          # Migration rule first: a waiting/running v2 is always preferred over
-          # the known-slow legacy cohort. This prevents a stale legacy run from
-          # holding the shared concurrency group until timeout.
           supersede_legacy_wgbs_if_v2_exists
 
           clean_workflow bounty1-full-wgbs-benchmark.yml
           clean_workflow bounty1-full-chromatin-benchmark.yml
           clean_workflow bounty1-wgbs-cohort-v2.yml
+          clean_workflow bounty1-wgbs-streaming-wt-pilot.yml
+          clean_workflow bounty1-chromatin-wt-sharded.yml
