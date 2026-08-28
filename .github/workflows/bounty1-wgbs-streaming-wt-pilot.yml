@@ -19,9 +19,11 @@ permissions:
 # Increase CNCB pressure gradually: two independent WGBS shards in parallel,
 # not 16 streams at once. Each shard still reads both complete compressed
 # objects and verifies the published MD5 before its checkpoint is accepted.
+# Do not cancel an expensive active shard when a later branch update arrives.
+# Housekeeping separately prevents duplicate queued runs.
 concurrency:
   group: bounty1-wgbs-v3-wt-pilot-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   candidate_shard:
