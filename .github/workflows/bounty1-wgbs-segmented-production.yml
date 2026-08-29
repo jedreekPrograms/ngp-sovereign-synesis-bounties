@@ -31,39 +31,12 @@ jobs:
       max-parallel: 4
       matrix:
         include:
-          - sample_id: WT_rep1_WGBS
-            run_accession: HRR1202754
-            r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202754/HRR1202754_f1.fq.gz
-            r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202754/HRR1202754_r2.fq.gz
-            md5_r1: 700da70777819f86c98d7665889a329e
-            md5_r2: 65bd9c8f90bc32536ad05a41bb578dd8
-            pair_start: '250000000'
-            pair_count: '50000000'
-            part: part6
-          - sample_id: SIRT1_rep1_WGBS
-            run_accession: HRR1202740
-            r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202740/HRR1202740_f1.fq.gz
-            r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202740/HRR1202740_r2.fq.gz
-            md5_r1: 3fbf8ee10f5176524a246b707bd5ad7e
-            md5_r2: f0370fe0d201ae32b47150977e1bdc1f
-            pair_start: '250000000'
-            pair_count: '50000000'
-            part: part6
-          - sample_id: SIRT1_rep2_WGBS
-            run_accession: HRR1202741
-            r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202741/HRR1202741_f1.fq.gz
-            r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202741/HRR1202741_r2.fq.gz
-            md5_r1: f851bf7a62a22e55e4fe798960a424fb
-            md5_r2: f1949646f0fa4f56e3a4f14a2061d1fe
-            pair_start: '250000000'
-            pair_count: '50000000'
-            part: part6
-          - sample_id: SIRT2_rep1_WGBS
-            run_accession: HRR1202742
-            r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202742/HRR1202742_f1.fq.gz
-            r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202742/HRR1202742_r2.fq.gz
-            md5_r1: 4acd4ee5c04819c9cafdba2e13f97e93
-            md5_r2: 3c8e437a40220f08ea729a28204ae505
+          - sample_id: SIRT2_rep2_WGBS
+            run_accession: HRR1202743
+            r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202743/HRR1202743_f1.fq.gz
+            r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202743/HRR1202743_r2.fq.gz
+            md5_r1: bc3669802e92a739d37333e05f662bab
+            md5_r2: bfe636eef625b7146169a4730aa350d6
             pair_start: '0'
             pair_count: '50000000'
             part: part1
