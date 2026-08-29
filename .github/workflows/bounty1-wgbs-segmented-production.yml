@@ -112,7 +112,7 @@ jobs:
           docker run --rm -v "$PWD/shard:/shard" bounty1-pace:wgbs-segmented-production bash -lc '
             set -euo pipefail
             samtools faidx /shard/ref/hg19.fa
-            Rscript /work/bin/export_pace_regions.R --output /shard/ref/pace.bed --flank 500
+            Rscript /work/bin/export_pace_regions.R --output /shard/ref/pace.bed --flank 2000
             test -s /shard/ref/pace.bed
             printf ">bootstrap\nN\n" > /shard/ref/pace-screen.fa
           '
