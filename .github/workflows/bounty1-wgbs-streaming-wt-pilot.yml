@@ -15,11 +15,11 @@ permissions:
   actions: read
 
 # 50M source-pair shards are validated durable checkpoints. Completed durable
-# ranges now include WT_rep1 0-200M, WT_rep2 0-150M, and SIRT1 rep1/rep2 0-100M.
-# WT_rep1 200-250M remains active in the preceding run; do not duplicate it.
-# Fill only the three freed slots with the next non-overlapping ranges while
-# keeping total concurrent CNCB pressure at four source libraries. Every shard
-# verifies both complete published source MD5s before its checkpoint is accepted.
+# ranges now include WT_rep1 0-250M, WT_rep2 0-150M, and SIRT1 rep1/rep2 0-100M.
+# Independent full-hg19 truth/context benchmarks (runs 33220888867/33220888878)
+# validated the production +/-2 kb Abismal `-a -m 0.20` screen with 0/603 truth
+# misses on 100k authentic WT pairs. Resume only the three non-overlapping ranges
+# below at max-parallel=3; every shard verifies both complete published source MD5s.
 # Do not cancel an expensive active shard when a later branch update arrives.
 concurrency:
   group: bounty1-wgbs-v3-wt-pilot-${{ github.ref }}
