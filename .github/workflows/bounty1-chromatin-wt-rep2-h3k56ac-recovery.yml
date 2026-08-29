@@ -5,10 +5,6 @@ on:
     branches: [bounty-1-real-pipeline]
     paths:
       - '.github/workflows/bounty1-chromatin-wt-rep2-h3k56ac-recovery.yml'
-  pull_request:
-    branches: [main]
-    paths:
-      - '.github/workflows/bounty1-chromatin-wt-rep2-h3k56ac-recovery.yml'
 
 permissions:
   contents: read
@@ -106,15 +102,8 @@ jobs:
               download_verified "$R2" "$MD5_R2" "$r2" "${SAMPLE}.shard${SHARD}.R2"
               python3 /work/bin/stream_interleaved_fastq.py --r1-source "$r1" --r2-source "$r2" \
                 --r1-md5 "$MD5_R1" --r2-md5 "$MD5_R2" | \
-              python3 -c '"'"'import sys,os
-shard=int(os.environ["SHARD"]); i=0
-while True:
-    rec=[sys.stdin.buffer.readline() for _ in range(8)]
-    if not rec[0]: break
-    if any(not x for x in rec): raise SystemExit("truncated interleaved FASTQ")
-    if i % 2 == shard: sys.stdout.buffer.write(b"".join(rec))
-    i += 1
-print(f"source_pairs={i} shard={shard}", file=sys.stderr)'"'"' 2> "/recovery/qc/${SAMPLE}.shard${SHARD}.split.log" | \
+              awk -v shard="$SHARD" '"'"'{ if (int((NR-1)/8)%2 == shard) print } END { if (NR%8 != 0) exit 42; print "source_pairs=" NR/8 " shard=" shard > "/dev/stderr" }'"'"' \
+                2> "/recovery/qc/${SAMPLE}.shard${SHARD}.split.log" | \
               fastp --stdin --interleaved_in --stdout --thread 4 \
                 --json "/recovery/qc/${SAMPLE}.shard${SHARD}.fastp.json" \
                 --html "/recovery/qc/${SAMPLE}.shard${SHARD}.fastp.html" \
@@ -171,7 +160,7 @@ print(f"source_pairs={i} shard={shard}", file=sys.stderr)'"'"' 2> "/recovery/qc/
           name: bounty1-chromatin-WT-input-checkpoint
           path: recovery/input-checkpoint
           github-token: ${{ github.token }}
-          run-id: ${{ env.INPUT_RUN_ID }}
+          run-id: 33148538119
 
       - name: Merge shards, remove duplicates globally, MAPQ30, MACS3 and fragments
         run: |
@@ -200,13 +189,14 @@ print(f"source_pairs={i} shard={shard}", file=sys.stderr)'"'"' 2> "/recovery/qc/
             bounty1-pace:chromatin-wt-rep2-recovery bash -lc '
               set -euo pipefail
               input_bam=$(find /recovery/input -name "*.mapq30.bam" -print -quit)
-              macs3 callpeak -t /recovery/work/WT_rep2_H3K56ac.mapq30.bam -c "$input_bam" -f BAMPE -g hs \
+              cd /recovery/work
+              macs3 callpeak -t WT_rep2_H3K56ac.mapq30.bam -c "$input_bam" -f BAMPE -g hs \
                 -n WT_rep2_H3K56ac_hg19_full -q 0.01 --keep-dup all -B \
                 > /recovery/qc/WT_rep2_H3K56ac.macs3.stdout.log 2> /recovery/qc/WT_rep2_H3K56ac.macs3.stderr.log
               test -s WT_rep2_H3K56ac_hg19_full_peaks.narrowPeak
               cp WT_rep2_H3K56ac_hg19_full_peaks.narrowPeak /recovery/results/
               wc -l WT_rep2_H3K56ac_hg19_full_peaks.narrowPeak > /recovery/results/WT_rep2_H3K56ac.peak-count.txt
-              samtools view -f 67 -F 2304 -q 30 /recovery/work/WT_rep2_H3K56ac.mapq30.bam | \
+              samtools view -f 67 -F 2304 -q 30 WT_rep2_H3K56ac.mapq30.bam | \
                 awk '"'"'BEGIN{OFS="\t"} $9 != 0 {p=$4-1;m=$8-1;s=(p<m?p:m);l=($9<0?-$9:$9);e=s+l;if(e>s)print $3,s,e}'"'"' | \
                 gzip -1 > /recovery/results/WT_rep2_H3K56ac.fragments.bed.gz
               gzip -t /recovery/results/WT_rep2_H3K56ac.fragments.bed.gz
