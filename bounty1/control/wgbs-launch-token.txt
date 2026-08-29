@@ -1,3 +1,4 @@
-launch-2026-08-29T19:41:00Z
-round=SIRT2_rep2_part1
-reason=two prior WGBS shards completed with durable artifacts; keep total heavy CNCB load near four by adding one non-overlapping 50M shard while two WGBS and one chromatin treatment remain active
+launch-2026-08-29T20:35:00Z
+round=WT_rep1_part7
+range=300000000-350000000
+reason=SIRT2_rep2_part1 remains the only active CNCB-heavy WGBS shard; WT_rep1 part6 has a durable checkpoint and part7 is the next non-overlapping 50M range; per-sample concurrency now permits controlled parallel progress without duplicate same-sample launches
