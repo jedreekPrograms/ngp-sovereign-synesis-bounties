@@ -5,11 +5,11 @@ on:
     branches:
       - bounty-1-real-pipeline
     paths:
-      - '.github/workflows/bounty1-wgbs-cohort-v3.yml'
+      - '.github/disabled-workflows/bounty1-wgbs-cohort-v3.yml'
       - '.github/workflows/bounty1-wgbs-v3-syntax.yml'
   pull_request:
     paths:
-      - '.github/workflows/bounty1-wgbs-cohort-v3.yml'
+      - '.github/disabled-workflows/bounty1-wgbs-cohort-v3.yml'
       - '.github/workflows/bounty1-wgbs-v3-syntax.yml'
 
 permissions:
@@ -24,7 +24,7 @@ jobs:
       - name: Validate checkpoint workflow invariants
         run: |
           set -euo pipefail
-          f=.github/workflows/bounty1-wgbs-cohort-v3.yml
+          f=.github/disabled-workflows/bounty1-wgbs-cohort-v3.yml
           test -s "$f"
           grep -Fq 'actions: read' "$f"
           grep -Fq 'Restore newest valid checkpoint from this or an older run' "$f"
