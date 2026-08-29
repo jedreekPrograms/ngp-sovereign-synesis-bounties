@@ -1,0 +1,110 @@
+name: Bounty 1 WT rep2 H3K56ac reducer retry
+
+on:
+  push:
+    branches: [bounty-1-real-pipeline]
+    paths:
+      - '.github/workflows/bounty1-chromatin-wt-rep2-h3k56ac-reduce-retry.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: bounty1-chromatin-wt-rep2-h3k56ac-reducer-retry
+  cancel-in-progress: false
+
+env:
+  SAMPLE: WT_rep2_H3K56ac
+  SOURCE_RUN_ID: '33245994711'
+  INPUT_RUN_ID: '33148538119'
+
+jobs:
+  reduce:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Load pinned analysis image
+        uses: docker/build-push-action@v6
+        with:
+          context: bounty1
+          load: true
+          pull: true
+          tags: bounty1-pace:chromatin-wt-rep2-reducer-retry
+          cache-from: type=gha,scope=bounty1-docker
+
+      - name: Download durable treatment alignment checkpoints
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bounty1-chromatin-WT_rep2_H3K56ac-align-shard-*
+          path: recovery/shards
+          github-token: ${{ github.token }}
+          run-id: 33245994711
+
+      - name: Download existing matched WT INPUT checkpoint only once
+        uses: actions/download-artifact@v4
+        with:
+          name: bounty1-chromatin-WT-input-checkpoint
+          path: recovery/input-checkpoint
+          github-token: ${{ github.token }}
+          run-id: 33148538119
+
+      - name: Validate checkpoint multiplicity and reduce in pinned image
+        run: |
+          set -euo pipefail
+          mkdir -p recovery/{work,input,results,qc}
+          find recovery/shards -name '*.position.bam' -type f -print | sort > recovery/work/shards.txt
+          test "$(wc -l < recovery/work/shards.txt)" -eq 2
+          cp recovery/input-checkpoint/input/*.bam recovery/input/
+          cp recovery/input-checkpoint/input/*.bai recovery/input/
+          docker run --rm \
+            -e SAMPLE \
+            -v "$PWD/recovery:/recovery" \
+            bounty1-pace:chromatin-wt-rep2-reducer-retry bash -lc '
+              set -euo pipefail
+              input_bam=$(find /recovery/input -name "*.mapq30.bam" -print -quit)
+              test -n "$input_bam"
+              samtools quickcheck -v "$input_bam"
+              mapfile -t shard_bams < /recovery/work/shards.txt
+              test "${#shard_bams[@]}" -eq 2
+              for bam in "${shard_bams[@]}"; do samtools quickcheck -v "$bam"; done
+              samtools merge -@ 4 -f /recovery/work/${SAMPLE}.position.bam "${shard_bams[@]}"
+              samtools quickcheck -v /recovery/work/${SAMPLE}.position.bam
+              samtools markdup -r -@ 4 /recovery/work/${SAMPLE}.position.bam /recovery/work/${SAMPLE}.dedup.bam
+              rm -f /recovery/work/${SAMPLE}.position.bam
+              samtools view -b -q 30 /recovery/work/${SAMPLE}.dedup.bam | samtools sort -@ 4 -m 2G -o /recovery/work/${SAMPLE}.mapq30.bam
+              rm -f /recovery/work/${SAMPLE}.dedup.bam
+              samtools index /recovery/work/${SAMPLE}.mapq30.bam
+              samtools quickcheck -v /recovery/work/${SAMPLE}.mapq30.bam "$input_bam"
+              samtools flagstat /recovery/work/${SAMPLE}.mapq30.bam > /recovery/qc/${SAMPLE}.flagstat.txt
+              test "$(samtools view -c /recovery/work/${SAMPLE}.mapq30.bam)" -gt 0
+              cd /recovery/work
+              macs3 callpeak -t ${SAMPLE}.mapq30.bam -c "$input_bam" -f BAMPE -g hs \
+                -n ${SAMPLE}_hg19_full -q 0.01 --keep-dup all -B \
+                > /recovery/qc/${SAMPLE}.macs3.stdout.log 2> /recovery/qc/${SAMPLE}.macs3.stderr.log
+              test -s ${SAMPLE}_hg19_full_peaks.narrowPeak
+              cp ${SAMPLE}_hg19_full_peaks.narrowPeak /recovery/results/
+              wc -l ${SAMPLE}_hg19_full_peaks.narrowPeak > /recovery/results/${SAMPLE}.peak-count.txt
+              samtools view -f 67 -F 2304 -q 30 ${SAMPLE}.mapq30.bam | \
+                awk '"'"'BEGIN{OFS="\t"} $9 != 0 {p=$4-1;m=$8-1;s=(p<m?p:m);l=($9<0?-$9:$9);e=s+l;if(e>s)print $3,s,e}'"'"' | \
+                gzip -1 > /recovery/results/${SAMPLE}.fragments.bed.gz
+              gzip -t /recovery/results/${SAMPLE}.fragments.bed.gz
+              cp ${SAMPLE}.mapq30.bam /recovery/results/
+              cp ${SAMPLE}.mapq30.bam.bai /recovery/results/
+              sha256sum /recovery/results/* > /recovery/qc/results.SHA256SUMS
+              sha256sum "${shard_bams[@]}" > /recovery/qc/alignment-shards.SHA256SUMS
+              sha256sum "$input_bam" > /recovery/qc/input-bam.SHA256SUMS
+            '
+
+      - name: Upload final WT rep2 H3K56ac evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounty1-chromatin-WT-WT_rep2_H3K56ac
+          path: |
+            recovery/results
+            recovery/qc
+          if-no-files-found: error
+          compression-level: 1
+          retention-days: 30
