@@ -55,8 +55,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p recovery/{work,input,results,qc}
-          find recovery/shards -name '*.position.bam' -type f -print | sort > recovery/work/shards.txt
-          test "$(wc -l < recovery/work/shards.txt)" -eq 2
           cp recovery/input-checkpoint/input/*.bam recovery/input/
           cp recovery/input-checkpoint/input/*.bai recovery/input/
           docker run --rm \
@@ -67,19 +65,27 @@ jobs:
               input_bam=$(find /recovery/input -name "*.mapq30.bam" -print -quit)
               test -n "$input_bam"
               samtools quickcheck -v "$input_bam"
-              mapfile -t shard_bams < /recovery/work/shards.txt
+
+              mapfile -t shard_bams < <(find /recovery/shards -name "*.position.bam" -type f -print | sort)
               test "${#shard_bams[@]}" -eq 2
-              for bam in "${shard_bams[@]}"; do samtools quickcheck -v "$bam"; done
+              printf "%s\n" "${shard_bams[@]}" > /recovery/qc/alignment-shards.list.txt
+              for bam in "${shard_bams[@]}"; do
+                test -s "$bam"
+                samtools quickcheck -v "$bam"
+              done
+
               samtools merge -@ 4 -f /recovery/work/${SAMPLE}.position.bam "${shard_bams[@]}"
               samtools quickcheck -v /recovery/work/${SAMPLE}.position.bam
               samtools markdup -r -@ 4 /recovery/work/${SAMPLE}.position.bam /recovery/work/${SAMPLE}.dedup.bam
               rm -f /recovery/work/${SAMPLE}.position.bam
-              samtools view -b -q 30 /recovery/work/${SAMPLE}.dedup.bam | samtools sort -@ 4 -m 2G -o /recovery/work/${SAMPLE}.mapq30.bam
+              samtools view -b -q 30 /recovery/work/${SAMPLE}.dedup.bam | \
+                samtools sort -@ 4 -m 2G -o /recovery/work/${SAMPLE}.mapq30.bam
               rm -f /recovery/work/${SAMPLE}.dedup.bam
               samtools index /recovery/work/${SAMPLE}.mapq30.bam
               samtools quickcheck -v /recovery/work/${SAMPLE}.mapq30.bam "$input_bam"
               samtools flagstat /recovery/work/${SAMPLE}.mapq30.bam > /recovery/qc/${SAMPLE}.flagstat.txt
               test "$(samtools view -c /recovery/work/${SAMPLE}.mapq30.bam)" -gt 0
+
               cd /recovery/work
               macs3 callpeak -t ${SAMPLE}.mapq30.bam -c "$input_bam" -f BAMPE -g hs \
                 -n ${SAMPLE}_hg19_full -q 0.01 --keep-dup all -B \
