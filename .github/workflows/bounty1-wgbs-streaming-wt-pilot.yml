@@ -15,7 +15,7 @@ permissions:
   actions: read
 
 # 50M source-pair shards are validated durable checkpoints. Completed durable
-# ranges now include WT_rep1 0-250M, WT_rep2 0-200M, and SIRT1 rep1/rep2 0-150M.
+# ranges now include WT_rep1 0-250M, WT_rep2 0-250M, and SIRT1 rep1/rep2 0-200M.
 # Independent full-hg19 truth/context benchmarks (runs 33220888867/33220888878)
 # validated the production +/-2 kb Abismal `-a -m 0.20` screen with 0/603 truth
 # misses on 100k authentic WT pairs. Resume only the three non-overlapping ranges
@@ -39,27 +39,27 @@ jobs:
             r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202755/HRR1202755_r2.fq.gz
             md5_r1: dcd665da6062db707fd67baa5d110e7d
             md5_r2: c67204ec1ceac450fbc6c80229e0c939
-            pair_start: '200000000'
+            pair_start: '250000000'
             pair_count: '50000000'
-            part: part5
+            part: part6
           - sample_id: SIRT1_rep1_WGBS
             run_accession: HRR1202740
             r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202740/HRR1202740_f1.fq.gz
             r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202740/HRR1202740_r2.fq.gz
             md5_r1: 3fbf8ee10f5176524a246b707bd5ad7e
             md5_r2: f0370fe0d201ae32b47150977e1bdc1f
-            pair_start: '150000000'
+            pair_start: '200000000'
             pair_count: '50000000'
-            part: part4
+            part: part5
           - sample_id: SIRT1_rep2_WGBS
             run_accession: HRR1202741
             r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202741/HRR1202741_f1.fq.gz
             r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202741/HRR1202741_r2.fq.gz
             md5_r1: f851bf7a62a22e55e4fe798960a424fb
             md5_r2: f1949646f0fa4f56e3a4f14a2061d1fe
-            pair_start: '150000000'
+            pair_start: '200000000'
             pair_count: '50000000'
-            part: part4
+            part: part5
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
