@@ -5,10 +5,12 @@ name: Bounty 1 WGBS segmented production
 # already-completed 50M shards on unrelated commits.
 #
 # To launch the armed round:
-#   1. verify no overlapping production run is active;
+#   1. verify no overlapping production run is active for the same sample;
 #   2. verify every earlier range has a durable artifact;
 #   3. change only bounty1/control/wgbs-launch-token.txt.
 #
+# Concurrency is scoped per sample. Different samples may progress in parallel,
+# while accidental duplicate launches for one sample remain serialized.
 # workflow_dispatch remains available for an intentional manual launch.
 on:
   workflow_dispatch:
@@ -20,26 +22,25 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: bounty1-wgbs-segmented-production
-  cancel-in-progress: false
-
 jobs:
   candidate_shard:
+    concurrency:
+      group: bounty1-wgbs-segmented-${{ matrix.sample_id }}
+      cancel-in-progress: false
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 2
       matrix:
         include:
-          - sample_id: SIRT2_rep2_WGBS
-            run_accession: HRR1202743
-            r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202743/HRR1202743_f1.fq.gz
-            r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202743/HRR1202743_r2.fq.gz
-            md5_r1: bc3669802e92a739d37333e05f662bab
-            md5_r2: bfe636eef625b7146169a4730aa350d6
-            pair_start: '0'
+          - sample_id: WT_rep1_WGBS
+            run_accession: HRR1202754
+            r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202754/HRR1202754_f1.fq.gz
+            r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202754/HRR1202754_r2.fq.gz
+            md5_r1: 700da70777819f86c98d7665889a329e
+            md5_r2: 65bd9c8f90bc32536ad05a41bb578dd8
+            pair_start: '300000000'
             pair_count: '50000000'
-            part: part1
+            part: part7
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
