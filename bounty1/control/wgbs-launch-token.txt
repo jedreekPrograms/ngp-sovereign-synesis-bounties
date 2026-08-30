@@ -1,4 +1,4 @@
-launch-2026-08-29T20:35:00Z
-round=WT_rep1_part7
-range=300000000-350000000
-reason=SIRT2_rep2_part1 remains the only active CNCB-heavy WGBS shard; WT_rep1 part6 has a durable checkpoint and part7 is the next non-overlapping 50M range; per-sample concurrency now permits controlled parallel progress without duplicate same-sample launches
+launch-2026-08-30T20:49:00+02:00
+round=SIRT2_rep1_part2+SIRT2_rep2_part2
+range=50000000-100000000
+reason=no active production runs remain; SIRT2 rep1/rep2 part1 durable checkpoints succeeded; part2 is the next non-overlapping 50M range for both lagging samples; run two samples in parallel under per-sample concurrency and max-parallel=2
