@@ -1,4 +1,4 @@
-launch-2026-08-30T20:49:00+02:00
-round=SIRT2_rep1_part2+SIRT2_rep2_part2
-range=50000000-100000000
-reason=no active production runs remain; SIRT2 rep1/rep2 part1 durable checkpoints succeeded; part2 is the next non-overlapping 50M range for both lagging samples; run two samples in parallel under per-sample concurrency and max-parallel=2
+launch-2026-08-31T00:49:00+02:00
+round=SIRT2_rep1_part3+SIRT2_rep2_part3
+range=100000000-150000000
+reason=previous SIRT2 rep1/rep2 part2 run completed successfully with durable artifacts and no active production runs remain; part3 is the next non-overlapping 50M range for both samples; preserve max-parallel=2 and per-sample concurrency
