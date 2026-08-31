@@ -1,4 +1,4 @@
-launch-2026-08-31T14:58:00Z
-round=SIRT2_rep1_part6+SIRT2_rep2_part6
-range=250000000-300000000
-reason=both SIRT2 part5 jobs completed successfully with durable artifacts and all fail-closed checks passed; no active heavy runs remain; part6 is the next non-overlapping 50M range for both samples; preserve checksum verification, fail-closed screening and max-parallel=2
+launch-2026-08-31T19:55:00Z
+round=SIRT1_rep2_part7_third_stream
+range=300000000-350000000
+reason=previous controlled three-stream round completed successfully; SIRT1_rep2 part6 has a durable checkpoint and no part7 launch is present in branch history; current SIRT2 part6 jobs are active on different samples, so this preserves non-overlap while keeping heavy CNCB concurrency at the previously validated level of three streams
