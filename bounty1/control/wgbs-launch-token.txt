@@ -1,4 +1,4 @@
-launch-2026-08-31T08:55:00Z
-round=SIRT1_rep1_part7_third_stream
-range=300000000-350000000
-reason=controlled increase from two to three concurrent CNCB-heavy streams after multiple successful two-stream rounds; SIRT1_rep1 part6 has a durable artifact and part7 is the next non-overlapping 50M range; current SIRT2 part5 jobs remain active and are different samples
+launch-2026-08-31T14:58:00Z
+round=SIRT2_rep1_part6+SIRT2_rep2_part6
+range=250000000-300000000
+reason=both SIRT2 part5 jobs completed successfully with durable artifacts and all fail-closed checks passed; no active heavy runs remain; part6 is the next non-overlapping 50M range for both samples; preserve checksum verification, fail-closed screening and max-parallel=2
