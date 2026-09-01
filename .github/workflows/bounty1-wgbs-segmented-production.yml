@@ -36,8 +36,8 @@ jobs:
             run_accession: HRR1202744
             r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202744/HRR1202744_f1.fq.gz
             r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202744/HRR1202744_r2.fq.gz
-            md5_r1: b6407a855881f02038111960721d17c8
-            md5_r2: 39ba6e669325a5e9ec31e6312f848f12
+            md5_r1: 031dc8b68e72cb4d4575b51ada0b660d
+            md5_r2: 3c553fe4f5ffd960ccf659407f0e468f
             pair_start: '50000000'
             pair_count: '50000000'
             part: part2
@@ -45,8 +45,8 @@ jobs:
             run_accession: HRR1202745
             r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202745/HRR1202745_f1.fq.gz
             r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202745/HRR1202745_r2.fq.gz
-            md5_r1: 8e889e9dadc4b6ddfa0c22629837dbe9
-            md5_r2: 62a0e877d2f3a3a52042cf691350062f
+            md5_r1: eb053b50fd425975199c5d7652f42cfd
+            md5_r2: 4946d6d2927b254c5e8108a37e13acf2
             pair_start: '50000000'
             pair_count: '50000000'
             part: part2
