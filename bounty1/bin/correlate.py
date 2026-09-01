@@ -86,23 +86,29 @@ def main():
     args = parser.parse_args()
 
     pace = read_pace(args.pace)
+
+    # differential_occupancy is the acceptance-facing SIRT6-target-locus
+    # endpoint produced by compute_chip_occupancy.py whenever independent loci
+    # are supplied.  The global fixed-universe endpoint is retained below only
+    # as a prespecified sensitivity analysis.
     primary = compute(pace, read_occ(args.occupancy, 'differential_occupancy'))
     result = {
         **primary,
         'primary_endpoint': {
             'occupancy_column': 'differential_occupancy',
-            'definition': 'global fixed histone peak-universe log2 fragment-CPM centered on WT mean',
+            'definition': (
+                'independently derived SIRT6 CUT&RUN target-locus '
+                'log2 fragment-CPM centered on the WT mean'
+            ),
         },
     }
 
-    # Report the independent SIRT6-locus analysis as a sensitivity analysis.
-    # It is never substituted for the primary endpoint after seeing results.
     try:
-        secondary = compute(pace, read_occ(args.occupancy, 'sirt6_differential_occupancy'))
+        secondary = compute(pace, read_occ(args.occupancy, 'global_differential_occupancy'))
     except ValueError:
         secondary = None
     if secondary is not None:
-        result['secondary_sirt6_locus_analysis'] = secondary
+        result['secondary_global_peak_universe_analysis'] = secondary
 
     Path(args.output).write_text(json.dumps(result, indent=2) + '\n', encoding='utf-8')
 
