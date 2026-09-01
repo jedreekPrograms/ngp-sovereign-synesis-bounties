@@ -1,3 +1,4 @@
-launch-2026-09-01T03:54:00Z
-round=SIRT2_part8
-range=350000000-400000000
+launch-2026-09-01T07:51:00Z
+round=SIRT2_part9
+range=400000000-450000000
+reason=SIRT2 part8 completed successfully for both replicates with durable artifacts; no active or queued heavy runs remain; part9 is the next non-overlapping 50M range; preserve checksum verification, fail-closed screening, and max-parallel=2
