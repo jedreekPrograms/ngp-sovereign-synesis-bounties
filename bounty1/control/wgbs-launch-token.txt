@@ -1,4 +1,4 @@
-launch-2026-09-01T10:52:00Z
-round=SIRT2_part10
-range=450000000-500000000
-reason=SIRT2 part9 completed successfully for both replicates with durable artifacts; no active or queued heavy runs remain; part10 is the next non-overlapping 50M range; preserve checksum verification, fail-closed screening, and max-parallel=2
+launch-2026-09-01-fourway-sirt3-sirt4-part1
+round=SIRT3_SIRT4_part1
+range=0-50000000
+reason=Increase safe WGBS parallelism without overlapping active SIRT2 part10; launch fresh part1 shards for SIRT3 and SIRT4 biological replicates; preserve checksum verification, fail-closed screening, per-sample concurrency, and max-parallel=4
