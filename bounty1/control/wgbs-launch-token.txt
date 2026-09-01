@@ -1,4 +1,4 @@
-launch-2026-09-01-fourway-sirt3-sirt4-part1
-round=SIRT3_SIRT4_part1
+launch-2026-09-01-fourway-sirt5-sirt6-part1
+round=SIRT5_SIRT6_part1
 range=0-50000000
-reason=Increase safe WGBS parallelism without overlapping active SIRT2 part10; launch fresh part1 shards for SIRT3 and SIRT4 biological replicates; preserve checksum verification, fail-closed screening, per-sample concurrency, and max-parallel=4
+reason=Raise total active WGBS heavy parallelism toward 10 without overlapping SIRT2/SIRT3/SIRT4 shards; launch fresh part1 shards for SIRT5 and SIRT6 biological replicates; preserve source MD5 verification, hg19 checksum verification, fail-closed screening, per-sample concurrency, and durable SHA256 checkpoints
