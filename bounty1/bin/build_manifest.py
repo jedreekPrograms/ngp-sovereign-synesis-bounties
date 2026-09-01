@@ -47,18 +47,19 @@ def main():
             'description': (
                 'paired H3K9ac/H3K56ac ChIP-seq and WGBS in WT and '
                 'SIRT1-7-deficient human mesenchymal progenitor cells, with '
-                'SIRT6 CUT&RUN used for a prespecified mechanistic sensitivity analysis'
+                'independent SIRT6 CUT&RUN used to define the target loci required '
+                'for the primary bounty correlation endpoint'
             ),
         },
         'analysis_plan': {
             'primary_endpoint': (
-                'global fixed histone peak-universe log2 fragment-CPM centered '
-                'on the WT mean for each histone mark'
+                'H3K9ac/H3K56ac log2 fragment-CPM over independently derived '
+                'SIRT6 CUT&RUN target loci, centered on the WT mean for each mark'
             ),
             'primary_endpoint_selected_before_results': True,
             'secondary_endpoint': (
-                'the same occupancy metric restricted to independently derived '
-                'SIRT6 CUT&RUN loci'
+                'global fixed histone peak-universe log2 fragment-CPM centered '
+                'on the WT mean for each histone mark'
             ),
             'secondary_endpoint_not_substituted_for_primary': True,
         },
@@ -71,6 +72,7 @@ def main():
             ),
             'minimum_reciprocal_overlap': args.sirt6_min_reciprocal_overlap,
             'independent_of_histone_marks': True,
+            'independent_of_dunedinpace': True,
         },
         'dunedinpace': {
             'intercept': pace_model['intercept'],
@@ -91,14 +93,19 @@ def main():
             'qvalue_threshold': args.peak_fdr,
             'sirt6_cutrun_qvalue_threshold': args.cutrun_fdr,
         },
+        'cutrun': {
+            'caller': 'macs3',
+            'fdr': args.cutrun_fdr,
+            'qvalue_threshold': args.cutrun_fdr,
+            'minimum_reciprocal_overlap': args.sirt6_min_reciprocal_overlap,
+        },
         'alignment': {
-            'aligner': 'bowtie2/bismark',
+            'aligner': 'bowtie2/bwa-meth',
             'reference_genome': 'hg19',
             'mapq_threshold': args.mapq,
             'duplicate_policy': (
                 'PCR duplicates removed before MAPQ filtering for ChIP-seq and '
-                'CUT&RUN; Bismark deduplication followed by pair-aware MAPQ '
-                'filtering for paired WGBS'
+                'CUT&RUN; pair-preserving duplicate removal/MAPQ filtering for WGBS'
             ),
         },
         'data_deposit_doi': args.doi,
@@ -112,18 +119,22 @@ def main():
 
     if corr.get('primary_endpoint'):
         manifest['analysis_plan']['correlation_primary_endpoint'] = corr['primary_endpoint']
-    if corr.get('secondary_sirt6_locus_analysis'):
-        manifest['secondary_sirt6_locus_correlations'] = corr['secondary_sirt6_locus_analysis']
+    if corr.get('secondary_global_peak_universe_analysis'):
+        manifest['secondary_global_peak_universe_correlations'] = corr[
+            'secondary_global_peak_universe_analysis'
+        ]
 
     if args.docker_image:
         image = Path(args.docker_image)
-        if image.exists() and image.is_file():
+        if exists := image.exists() and image.is_file():
             digest = hashlib.md5(usedforsecurity=False)
             with image.open('rb') as handle:
                 for chunk in iter(lambda: handle.read(1024 * 1024), b''):
                     digest.update(chunk)
             manifest['docker_image_path'] = str(image)
             manifest['docker_image_md5'] = digest.hexdigest()
+        if not exists:
+            raise ValueError(f'docker image path does not exist or is not a file: {image}')
 
     Path(args.output).write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
 
