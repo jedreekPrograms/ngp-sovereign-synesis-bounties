@@ -29,45 +29,27 @@ jobs:
       cancel-in-progress: false
     strategy:
       fail-fast: false
-      max-parallel: 10
+      max-parallel: 2
       matrix:
         include:
-          - sample_id: SIRT5_rep1_WGBS
-            run_accession: HRR1202748
-            r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202748/HRR1202748_f1.fq.gz
-            r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202748/HRR1202748_r2.fq.gz
-            md5_r1: 7138c1ddeaae98531cb81040ca984ac6
-            md5_r2: f19c988758066d91ae7928354280db13
-            pair_start: '0'
+          - sample_id: SIRT3_rep1_WGBS
+            run_accession: HRR1202744
+            r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202744/HRR1202744_f1.fq.gz
+            r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202744/HRR1202744_r2.fq.gz
+            md5_r1: b6407a855881f02038111960721d17c8
+            md5_r2: 39ba6e669325a5e9ec31e6312f848f12
+            pair_start: '50000000'
             pair_count: '50000000'
-            part: part1
-          - sample_id: SIRT5_rep2_WGBS
-            run_accession: HRR1202749
-            r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202749/HRR1202749_f1.fq.gz
-            r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202749/HRR1202749_r2.fq.gz
-            md5_r1: 119b7f9d782c76a0598dd5c925402ad5
-            md5_r2: 70d984783797bba65033d826d44f3dd9
-            pair_start: '0'
+            part: part2
+          - sample_id: SIRT3_rep2_WGBS
+            run_accession: HRR1202745
+            r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202745/HRR1202745_f1.fq.gz
+            r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202745/HRR1202745_r2.fq.gz
+            md5_r1: 8e889e9dadc4b6ddfa0c22629837dbe9
+            md5_r2: 62a0e877d2f3a3a52042cf691350062f
+            pair_start: '50000000'
             pair_count: '50000000'
-            part: part1
-          - sample_id: SIRT6_rep1_WGBS
-            run_accession: HRR1202750
-            r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202750/HRR1202750_f1.fq.gz
-            r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202750/HRR1202750_r2.fq.gz
-            md5_r1: c0241d5399639c14299d1080cbd0053b
-            md5_r2: 01d3a30b1f8e622a5fef4b656674b9a1
-            pair_start: '0'
-            pair_count: '50000000'
-            part: part1
-          - sample_id: SIRT6_rep2_WGBS
-            run_accession: HRR1202751
-            r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202751/HRR1202751_f1.fq.gz
-            r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202751/HRR1202751_r2.fq.gz
-            md5_r1: 317a9edbb409c41afa8624a10fd8c0b0
-            md5_r2: f11ce52b183b0ea1c485e3df9271d5d2
-            pair_start: '0'
-            pair_count: '50000000'
-            part: part1
+            part: part2
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
