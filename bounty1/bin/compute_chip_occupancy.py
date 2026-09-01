@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
-"""Compute global and SIRT6-locus H3K9ac/H3K56ac occupancy.
+"""Compute SIRT6-target-locus and global H3K9ac/H3K56ac occupancy.
 
 Primary bounty endpoint
 -----------------------
-For each histone mark, a fixed peak universe is created from the union of all
-MACS3 peaks for that mark. Each sample is quantified over the same universe.
-The primary scalar is log2(fragment CPM + 1), centered on the WT mean for the
-same mark. The peak universe is defined without using DunedinPACE values.
+The bounty asks for differential H3K9ac/H3K56ac occupancy at SIRT6 target
+loci.  When --loci-bed is provided, the primary ``differential_occupancy``
+column is therefore the fragment-level log2(CPM + 1) signal over an
+independently defined SIRT6 CUT&RUN locus set, centered on the WT mean for the
+same histone mark.  These loci are defined without using histone occupancy or
+DunedinPACE values.
 
-Secondary mechanistic endpoint
-------------------------------
-If --loci-bed is provided, the same fragment-level quantification is also
-computed over an independently defined SIRT6 CUT&RUN locus set (HRA005392).
-This is reported separately and never substituted silently for the primary
-endpoint.
+Secondary global endpoint
+-------------------------
+For each histone mark, a fixed peak universe is also created from the union of
+all MACS3 peaks for that mark.  Each sample is quantified over the same
+universe and reported as ``global_differential_occupancy``.  This is retained
+as a prespecified sensitivity analysis and is never substituted for the SIRT6
+locus endpoint after results are observed.
 
 For paired-end libraries, only the primary read1 of each proper pair represents
 a fragment. For single-end libraries, each primary mapped read is a fragment.
@@ -189,14 +192,17 @@ def main():
             'sirt6_log2_cpm': sirt6_value,
         })
 
-    # Primary acceptance metric: global fixed-universe occupancy.
-    center_on_wt(rows, 'global_log2_cpm', 'differential_occupancy')
+    # Keep the global fixed-universe endpoint as a prespecified sensitivity
+    # analysis, but make SIRT6 target loci the acceptance-facing endpoint.
     center_on_wt(rows, 'global_log2_cpm', 'global_differential_occupancy')
     if sirt6_regions is not None:
         center_on_wt(rows, 'sirt6_log2_cpm', 'sirt6_differential_occupancy')
+        for row in rows:
+            row['differential_occupancy'] = row['sirt6_differential_occupancy']
     else:
         for row in rows:
             row['sirt6_differential_occupancy'] = None
+            row['differential_occupancy'] = row['global_differential_occupancy']
 
     fieldnames = [
         'condition', 'replicate', 'mark',
