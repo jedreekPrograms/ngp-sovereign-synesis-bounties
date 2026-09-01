@@ -19,6 +19,12 @@ set -euo pipefail
 # each resumable segment stays fail-closed. Pair ranges are non-overlapping and
 # may later be concatenated as gzip members before the final full-hg19 stage.
 #
+# If a requested range begins at or beyond a checksum-verified source EOF, the
+# script emits an explicit zero-pair EOF checkpoint and succeeds. This is not a
+# relaxed error path: it is accepted only when the full source stream completed
+# successfully, both source MD5 checks passed, and the measured total pair count
+# proves start >= EOF.
+#
 # Usage:
 #   screen_wgbs_pace_candidates.sh SAMPLE R1 R2 R1_MD5 R2_MD5 \
 #       SCREEN_REFERENCE_FASTA THREADS
@@ -118,6 +124,8 @@ test -s "$screen_index"
 candidate_r1="${sample_id}.candidate.R1.fastq.gz"
 candidate_r2="${sample_id}.candidate.R2.fastq.gz"
 status_file="${sample_id}.pace-screen.pipeline-status.txt"
+range_log="${sample_id}.pace-screen.range.stderr.log"
+source_log="${sample_id}.pace-screen.source-stream.log"
 workdir="$(mktemp -d "/tmp/${sample_id}.abismal-screen.XXXXXX")"
 cleanup() {
   rm -rf "$workdir"
@@ -128,7 +136,7 @@ set +e
 python3 "${script_dir}/stream_interleaved_fastq.py" \
   --r1-source "$r1_source" --r2-source "$r2_source" \
   --r1-md5 "$r1_md5" --r2-md5 "$r2_md5" \
-  2> "${sample_id}.pace-screen.source-stream.log" | \
+  2> "$source_log" | \
 python3 -c '
 import sys
 start = int(sys.argv[1])
@@ -153,7 +161,7 @@ print(f"pair-range total={idx} start={start} count={count} selected={selected}",
 if selected == 0:
     raise SystemExit("pair range selected zero records")
 ' "$pair_start" "$pair_count" \
-  2> "${sample_id}.pace-screen.range.stderr.log" | \
+  2> "$range_log" | \
 fastp \
   --stdin --interleaved_in --stdout \
   --json "${sample_id}.pace-screen.fastp.json" \
@@ -180,6 +188,37 @@ set -e
   echo "pair_start=${pair_start}"
   echo "pair_count=${pair_count}"
 } > "$status_file"
+
+# A zero selected range is a clean EOF only after the complete source stream
+# passed its MD5 checks.  Parse the measured total from the range log and keep
+# the raw range-filter exit code for auditability while normalizing the public
+# checkpoint status to success.
+if (( feed_status[0] == 0 && feed_status[1] != 0 )); then
+  range_summary="$(grep -E '^pair-range total=[0-9]+ start=[0-9]+ count=[0-9]+ selected=0$' "$range_log" | tail -n 1 || true)"
+  if [[ -n "$range_summary" ]] && grep -q '^MD5 OK: R1 ' "$source_log" && grep -q '^MD5 OK: R2 ' "$source_log"; then
+    source_total="$(sed -E 's/^pair-range total=([0-9]+).*/\1/' <<< "$range_summary")"
+    measured_start="$(sed -E 's/^pair-range total=[0-9]+ start=([0-9]+).*/\1/' <<< "$range_summary")"
+    if (( measured_start >= source_total )); then
+      printf '' | gzip -c > "$candidate_r1"
+      printf '' | gzip -c > "$candidate_r2"
+      echo 0 > "${sample_id}.candidate-pair-count.txt"
+      du -h "$candidate_r1" "$candidate_r2" > "${sample_id}.candidate-fastq-size.txt"
+      {
+        echo "stream_interleaved_fastq=0"
+        echo "pair_range_filter=0"
+        echo "pair_range_filter_raw=${feed_status[1]}"
+        echo "fastp=0"
+        echo "chunked_abismal_screen=0"
+        echo "pair_start=${pair_start}"
+        echo "pair_count=${pair_count}"
+        echo "source_total_pairs=${source_total}"
+        echo "source_eof=1"
+      } > "$status_file"
+      printf '%s\n%s\n' "$candidate_r1" "$candidate_r2"
+      exit 0
+    fi
+  fi
+fi
 
 for code in "${feed_status[@]}"; do
   if (( code != 0 )); then
