@@ -38,18 +38,18 @@ jobs:
             r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202744/HRR1202744_r2.fq.gz
             md5_r1: 031dc8b68e72cb4d4575b51ada0b660d
             md5_r2: 3c553fe4f5ffd960ccf659407f0e468f
-            pair_start: '200000000'
+            pair_start: '250000000'
             pair_count: '50000000'
-            part: part5
+            part: part6
           - sample_id: SIRT3_rep2_WGBS
             run_accession: HRR1202745
             r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202745/HRR1202745_f1.fq.gz
             r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202745/HRR1202745_r2.fq.gz
             md5_r1: eb053b50fd425975199c5d7652f42cfd
             md5_r2: 4946d6d2927b254c5e8108a37e13acf2
-            pair_start: '200000000'
+            pair_start: '250000000'
             pair_count: '50000000'
-            part: part5
+            part: part6
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
