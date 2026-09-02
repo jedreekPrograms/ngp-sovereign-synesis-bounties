@@ -1,4 +1,4 @@
-launch-2026-09-02-sirt3-part6
-round=SIRT3_part6
-range=250000000-300000000
-reason=SIRT3 part1 through part5 checkpoints are durable, no heavy runs are active or queued, and the next requested range is strictly non-overlapping. Advance only SIRT3 biological replicates with two concurrent 50M shards. Preserve published source MD5 verification, checksum-verified hg19, fail-closed screening including checksum-verified EOF handling, per-sample concurrency, and durable SHA256 checkpoints.
+launch-2026-09-02-sirt3-part7
+round=SIRT3_part7
+range=300000000-350000000
+reason=SIRT3 part1 through part6 checkpoints are durable, no heavy runs are active or queued, and the next requested range is strictly non-overlapping. Advance only SIRT3 biological replicates with two concurrent 50M shards. Preserve published source MD5 verification, checksum-verified hg19, fail-closed screening including checksum-verified EOF handling, per-sample concurrency, and durable SHA256 checkpoints.
