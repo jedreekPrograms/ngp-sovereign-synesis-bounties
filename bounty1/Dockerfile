@@ -28,6 +28,14 @@ RUN micromamba install -y -n base -c conda-forge -c bioconda \
       bioconductor-illuminahumanmethylationepicanno.ilm10b4.hg19=0.6.0 \
     && micromamba clean --all --yes
 
+# The current Bioconda IDR build is pinned to Python 3.9, while the primary
+# analysis environment intentionally uses Python 3.11. Keep the official
+# Kundaje IDR implementation isolated instead of weakening either pin.
+RUN micromamba create -y -n idr -c conda-forge -c bioconda \
+      python=3.9 \
+      idr=2.0.4.2 \
+    && micromamba clean --all --yes
+
 # BSMAP is kept in an isolated environment because the Bioconda 2.90 build has
 # legacy runtime dependencies. It is used only by the experimental, fail-closed
 # WGBS prefilter benchmark; final production alignment remains bwa-meth against

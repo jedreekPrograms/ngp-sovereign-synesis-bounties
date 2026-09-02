@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'bin'))
 import correlate
 import compute_chip_occupancy as occupancy
+import compute_chip_qc as chip_qc
 
 
 def test_pearson_requires_three():
@@ -49,7 +50,20 @@ def test_fragment_representative_counts_one_mate_per_pair():
     assert occupancy.is_fragment_representative(Read(is_paired=False)) is True
 
 
-def test_manifest_uses_model_metadata_and_marks_data_as_non_synthetic(tmp_path):
+def test_idr_output_is_converted_from_minus_log10_and_thresholded(tmp_path):
+    path = tmp_path / 'idr.txt'
+    path.write_text(
+        'chr1\t1\t2\tx\t0\t.\t1\t2\t3\t0\t2\t2\n'
+        'chr1\t3\t4\ty\t0\t.\t1\t2\t3\t0\t1\t1\n',
+        encoding='utf-8',
+    )
+    result = chip_qc.parse_idr_output(path, 0.05)
+    assert result['compared_peak_count'] == 2
+    assert result['reproducible_peak_count'] == 1
+    assert abs(result['worst_retained_global_idr'] - 0.01) < 1e-12
+
+
+def test_manifest_uses_model_metadata_and_measured_chip_qc(tmp_path):
     c = tmp_path/'c.json'
     c.write_text(json.dumps({
         'n_paired': 4,
@@ -70,10 +84,19 @@ def test_manifest_uses_model_metadata_and_marks_data_as_non_synthetic(tmp_path):
             'annotation': 'IlluminaHumanMethylationEPICanno.ilm10b4.hg19',
             'source_package': 'danbelsky/DunedinPACE',
         })
+    qc = tmp_path/'chip_qc.json'
+    qc.write_text(json.dumps({
+        'idr_threshold': 0.05,
+        'mapq_threshold': 30,
+        'idr_definition': 'measured fixture',
+        'nrf_definition': 'measured fixture',
+        'H3K9ac': {'idr': 0.01, 'nrf': 0.95, 'reproducible_peak_count': 42},
+        'H3K56ac': {'idr': 0.02, 'nrf': 0.96, 'reproducible_peak_count': 43},
+    }))
     o = tmp_path/'manifest.json'
     subprocess.check_call([
         sys.executable, str(ROOT/'bin/build_manifest.py'),
-        '--correlations', str(c), '--model-metadata', str(model),
+        '--correlations', str(c), '--model-metadata', str(model), '--chip-qc', str(qc),
         '--mapq','30','--peak-fdr','0.01','--output',str(o)
     ])
     m = json.loads(o.read_text())
@@ -82,12 +105,16 @@ def test_manifest_uses_model_metadata_and_marks_data_as_non_synthetic(tmp_path):
     assert m['peak_calling']['fdr'] < 0.05
     assert m['dunedinpace']['intercept'] == -1.2345
     assert m['dunedinpace']['model'] == 'fixture-model'
+    assert m['chip_seq_qc']['H3K9ac']['idr'] == 0.01
+    assert m['chip_seq_qc']['H3K9ac']['nrf'] == 0.95
+    assert m['chip_seq_qc']['H3K56ac']['reproducible_peak_count'] == 43
     assert m['data_source']['primary_study'] == 'HRA003336'
     assert m['data_source']['sirt6_cutrun_study'] == 'HRA005392'
     assert m['locus_definition']['independent_of_histone_marks'] is True
     assert m['locus_definition']['minimum_reciprocal_overlap'] == 0.50
     assert m['provenance']['dunedinpace_intercept_read_from_upstream_model'] is True
     assert m['provenance']['sirt6_loci_derived_independently'] is True
+    assert m['provenance']['chip_seq_qc_computed'] is True
     assert m['provenance']['synthetic_values_used'] is False
     assert m['data_deposit_doi'] == ''
 

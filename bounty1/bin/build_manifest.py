@@ -21,10 +21,27 @@ def load_model_metadata(path):
     }
 
 
+def load_chip_qc(path):
+    qc = json.loads(Path(path).read_text(encoding='utf-8'))
+    for mark in ('H3K9ac', 'H3K56ac'):
+        if mark not in qc:
+            raise ValueError(f'chip QC missing {mark}')
+        idr = float(qc[mark]['idr'])
+        nrf = float(qc[mark]['nrf'])
+        if not 0.0 <= idr <= 1.0:
+            raise ValueError(f'{mark} invalid IDR {idr}')
+        if not 0.0 <= nrf <= 1.0:
+            raise ValueError(f'{mark} invalid NRF {nrf}')
+        if int(qc[mark].get('reproducible_peak_count', 0)) <= 0:
+            raise ValueError(f'{mark} has no measured reproducible peaks')
+    return qc
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--correlations', required=True)
     parser.add_argument('--model-metadata', required=True)
+    parser.add_argument('--chip-qc', default='')
     parser.add_argument('--mapq', required=True, type=int)
     parser.add_argument('--peak-fdr', required=True, type=float)
     parser.add_argument('--cutrun-fdr', default=0.05, type=float)
@@ -36,6 +53,7 @@ def main():
 
     corr = json.loads(Path(args.correlations).read_text(encoding='utf-8'))
     pace_model = load_model_metadata(args.model_metadata)
+    chip_qc = load_chip_qc(args.chip_qc) if args.chip_qc else None
 
     manifest = {
         'pipeline_version': '1.0.0',
@@ -113,9 +131,28 @@ def main():
             'correlations_computed': True,
             'dunedinpace_intercept_read_from_upstream_model': True,
             'sirt6_loci_derived_independently': True,
+            'chip_seq_qc_computed': chip_qc is not None,
             'synthetic_values_used': False,
         },
     }
+
+    if chip_qc is not None:
+        manifest['chip_seq_qc'] = {
+            mark: {
+                'idr': float(chip_qc[mark]['idr']),
+                'nrf': float(chip_qc[mark]['nrf']),
+                'reproducible_peak_count': int(chip_qc[mark]['reproducible_peak_count']),
+                'samples': chip_qc[mark].get('samples', []),
+                'replicate_pairs': chip_qc[mark].get('replicate_pairs', []),
+            }
+            for mark in ('H3K9ac', 'H3K56ac')
+        }
+        manifest['chip_seq_qc']['method'] = {
+            'idr_threshold': float(chip_qc.get('idr_threshold', 0.05)),
+            'mapq_threshold': int(chip_qc.get('mapq_threshold', args.mapq)),
+            'idr_definition': chip_qc.get('idr_definition', ''),
+            'nrf_definition': chip_qc.get('nrf_definition', ''),
+        }
 
     if corr.get('primary_endpoint'):
         manifest['analysis_plan']['correlation_primary_endpoint'] = corr['primary_endpoint']

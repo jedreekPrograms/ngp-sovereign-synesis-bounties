@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Strict final-submission validator for Bounty #1.
 
-This validator is intentionally stricter than the upstream pytest harness.  It
-checks the literal scientific acceptance criteria as well as the Definition of
-Done evidence that can be verified locally.  It never substitutes acceptance
-targets for measured values.
+This validator is intentionally stricter than the upstream pytest harness. It
+checks literal acceptance criteria and measured provenance and never
+substitutes acceptance targets for measured values.
 """
 from __future__ import annotations
 
@@ -21,6 +20,8 @@ MIN_PEARSON_R = 0.92
 MAX_P_VALUE = 0.01
 MAX_FDR = 0.05
 MIN_MAPQ = 30
+MAX_IDR = 0.05
+MIN_NRF = 0.9
 MIN_REPORT_PAGES = 8
 
 
@@ -57,7 +58,7 @@ def pdf_pages(path: Path) -> int:
         raise ValueError(f"missing/empty supplementary report: {path}")
     try:
         from pypdf import PdfReader
-    except ImportError as exc:  # pragma: no cover - dependency installed in final CI
+    except ImportError as exc:
         raise ValueError("pypdf is required to validate report page count") from exc
     return len(PdfReader(str(path)).pages)
 
@@ -76,10 +77,8 @@ def validate(
     scores = load_csv(scores_path)
     occupancy = load_csv(occupancy_path)
     pace_qc = load_csv(pace_qc_path)
-
     errors: list[str] = []
 
-    # Upstream acceptance-test contract.
     try:
         intercept = finite(manifest["dunedinpace"]["intercept"], "DunedinPACE intercept")
         if abs(intercept - REFERENCE_INTERCEPT) > INTERCEPT_TOLERANCE:
@@ -124,6 +123,25 @@ def validate(
     except (KeyError, TypeError, ValueError) as exc:
         errors.append(f"invalid MAPQ threshold: {exc}")
 
+    for mark in ("H3K9ac", "H3K56ac"):
+        try:
+            qc = manifest["chip_seq_qc"][mark]
+            idr = finite(qc["idr"], f"{mark} IDR")
+            nrf = finite(qc["nrf"], f"{mark} NRF")
+            reproducible = int(qc.get("reproducible_peak_count", 0))
+            if idr > MAX_IDR:
+                errors.append(f"{mark} IDR={idr:.6g} > {MAX_IDR}")
+            if nrf <= MIN_NRF:
+                errors.append(f"{mark} NRF={nrf:.6g} <= {MIN_NRF}")
+            if reproducible <= 0:
+                errors.append(f"{mark} has no measured IDR-reproducible peaks")
+            if not qc.get("samples"):
+                errors.append(f"{mark} chip_seq_qc.samples missing measured NRF evidence")
+            if not qc.get("replicate_pairs"):
+                errors.append(f"{mark} chip_seq_qc.replicate_pairs missing measured IDR evidence")
+        except (KeyError, TypeError, ValueError) as exc:
+            errors.append(f"invalid {mark} ChIP-seq QC: {exc}")
+
     doi = str(manifest.get("data_deposit_doi", "")).strip()
     if not doi.startswith("10.") or "/" not in doi:
         errors.append(f"missing/invalid persistent DOI: {doi!r}")
@@ -133,9 +151,9 @@ def validate(
         errors.append("manifest must explicitly state provenance.synthetic_values_used=false")
     if provenance.get("correlations_computed") is not True:
         errors.append("manifest must explicitly state provenance.correlations_computed=true")
+    if provenance.get("chip_seq_qc_computed") is not True:
+        errors.append("manifest must explicitly state provenance.chip_seq_qc_computed=true")
 
-    # Docker/Singularity checksum criterion: require a real exported image file,
-    # not merely a digest string detached from an artifact.
     image_path_raw = str(manifest.get("docker_image_path", "")).strip()
     expected_md5 = str(manifest.get("docker_image_md5", "")).strip().lower()
     if not image_path_raw or not expected_md5:
@@ -164,8 +182,6 @@ def validate(
     if len(pace_qc) < min_paired:
         errors.append(f"PACE QC table has {len(pace_qc)} rows; require >= {min_paired}")
 
-    # Each paired observation needs both histone marks.  WT rows may additionally
-    # be present solely as the prespecified centering baseline.
     keys_by_mark: dict[str, set[tuple[str, int]]] = {"H3K9ac": set(), "H3K56ac": set()}
     for row in occupancy:
         mark = row.get("mark", "")

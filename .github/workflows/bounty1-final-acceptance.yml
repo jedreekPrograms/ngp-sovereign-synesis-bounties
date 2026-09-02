@@ -7,6 +7,10 @@ on:
         description: "Persistent DOI for the real derived-data deposit"
         required: true
         type: string
+      chip_qc_run_id:
+        description: "Successful Bounty 1 ChIP QC workflow run containing bounty1-chip-seq-qc"
+        required: true
+        type: string
       min_paired:
         description: "Minimum fully paired real observations"
         required: true
@@ -15,6 +19,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   final_acceptance:
@@ -35,6 +40,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install pytest scipy numpy pandas matplotlib reportlab pypdf
 
+      - name: Download measured ChIP-seq QC checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          name: bounty1-chip-seq-qc
+          path: bounty1/results/qc/chip
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.chip_qc_run_id }}
+
       - name: Require measured production outputs
         run: |
           set -euo pipefail
@@ -43,6 +56,7 @@ jobs:
           test -s bounty1/results/pace/pace_model_metadata.csv
           test -s bounty1/results/chip/histone_occupancy.csv
           test -s bounty1/results/correlations.json
+          test -s bounty1/results/qc/chip/chip_seq_qc.json
           python - <<'PY'
           import json
           from pathlib import Path
@@ -55,6 +69,12 @@ jobs:
               pval = data[f'{mark}_vs_DunedinPACE']['p_value']
               if not (r > 0.92 and pval < 0.01):
                   raise SystemExit(f'{mark} acceptance not met: r={r}, p={pval}')
+          qc = json.loads(Path('bounty1/results/qc/chip/chip_seq_qc.json').read_text())
+          for mark in ('H3K9ac', 'H3K56ac'):
+              if not (float(qc[mark]['idr']) <= 0.05 and float(qc[mark]['nrf']) > 0.9):
+                  raise SystemExit(f"{mark} ChIP QC acceptance not met: {qc[mark]}")
+              if int(qc[mark].get('reproducible_peak_count', 0)) <= 0:
+                  raise SystemExit(f"{mark} has no measured IDR-reproducible peaks")
           PY
 
       - name: Build and export the real analysis image
@@ -73,6 +93,7 @@ jobs:
           python bounty1/bin/build_manifest.py \
             --correlations bounty1/results/correlations.json \
             --model-metadata bounty1/results/pace/pace_model_metadata.csv \
+            --chip-qc bounty1/results/qc/chip/chip_seq_qc.json \
             --mapq 30 \
             --peak-fdr 0.01 \
             --cutrun-fdr 0.05 \
@@ -102,6 +123,7 @@ jobs:
           cp bounty1/results/pace/pace_probe_qc.csv results/pace_probe_qc.csv
           cp bounty1/results/pace/pace_model_metadata.csv results/pace_model_metadata.csv
           cp bounty1/results/chip/histone_occupancy.csv results/histone_occupancy.csv
+          cp bounty1/results/qc/chip/chip_seq_qc.json results/chip_seq_qc.json
 
       - name: Strict literal bounty gate
         run: |
