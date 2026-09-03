@@ -1,0 +1,157 @@
+name: Bounty 1 WGBS segmented production
+
+# Heavy production is deliberately NOT tied to pull_request. GitHub evaluates
+# PR path filters against the cumulative PR diff, which previously relaunched
+# already-completed 50M shards on unrelated commits.
+#
+# To launch the armed round:
+#   1. verify no overlapping production run is active for the same sample;
+#   2. verify every earlier range has a durable artifact;
+#   3. change only bounty1/control/wgbs-launch-token.txt.
+#
+# Concurrency is scoped per sample. Different samples may progress in parallel,
+# while accidental duplicate launches for one sample remain serialized.
+# workflow_dispatch remains available for an intentional manual launch.
+on:
+  workflow_dispatch:
+  push:
+    branches: [bounty-1-real-pipeline]
+    paths:
+      - 'bounty1/control/wgbs-launch-token.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  candidate_shard:
+    concurrency:
+      group: bounty1-wgbs-segmented-${{ matrix.sample_id }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - sample_id: SIRT3_rep1_WGBS
+            run_accession: HRR1202744
+            r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202744/HRR1202744_f1.fq.gz
+            r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202744/HRR1202744_r2.fq.gz
+            md5_r1: 031dc8b68e72cb4d4575b51ada0b660d
+            md5_r2: 3c553fe4f5ffd960ccf659407f0e468f
+            pair_start: '450000000'
+            pair_count: '50000000'
+            part: part10
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      SAMPLE_ID: ${{ matrix.sample_id }}
+      RUN_ACCESSION: ${{ matrix.run_accession }}
+      R1_URL: ${{ matrix.r1_url }}
+      R2_URL: ${{ matrix.r2_url }}
+      MD5_R1: ${{ matrix.md5_r1 }}
+      MD5_R2: ${{ matrix.md5_r2 }}
+      WGBS_PAIR_START: ${{ matrix.pair_start }}
+      WGBS_PAIR_COUNT: ${{ matrix.pair_count }}
+      PART: ${{ matrix.part }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Load pinned analysis image from shared cache
+        uses: docker/build-push-action@v6
+        with:
+          context: bounty1
+          load: true
+          pull: true
+          tags: bounty1-pace:wgbs-segmented-production
+          cache-from: type=gha,scope=bounty1-docker
+          cache-to: type=gha,mode=max,scope=bounty1-docker
+
+      - name: Prepare checksum-verified hg19 and official PACE loci
+        run: |
+          set -euo pipefail
+          mkdir -p shard/ref shard/out shard/qc
+          curl -fsSL --retry 10 --retry-delay 5 --retry-all-errors \
+            -o shard/ref/hg19.fa.gz \
+            https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz
+          curl -fsSL --retry 10 --retry-delay 5 --retry-all-errors \
+            -o shard/ref/md5sum.txt \
+            https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/md5sum.txt
+          (
+            cd shard/ref
+            grep -E '[[:space:]]hg19.fa.gz$' md5sum.txt > hg19.fa.gz.md5
+            md5sum --check hg19.fa.gz.md5
+            gzip -d hg19.fa.gz
+          )
+          docker run --rm -v "$PWD/shard:/shard" bounty1-pace:wgbs-segmented-production bash -lc '
+            set -euo pipefail
+            samtools faidx /shard/ref/hg19.fa
+            Rscript /work/bin/export_pace_regions.R --output /shard/ref/pace.bed --flank 2000
+            test -s /shard/ref/pace.bed
+            printf ">bootstrap\nN\n" > /shard/ref/pace-screen.fa
+          '
+
+      - name: Screen one non-overlapping 50M source-pair shard
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -e SAMPLE_ID -e R1_URL -e R2_URL -e MD5_R1 -e MD5_R2 \
+            -e WGBS_PAIR_START -e WGBS_PAIR_COUNT \
+            -v "$PWD/shard:/shard" bounty1-pace:wgbs-segmented-production bash -lc '
+              set -euo pipefail
+              cd /shard/out
+              bash /work/bin/screen_wgbs_pace_candidates.sh \
+                "$SAMPLE_ID" "$R1_URL" "$R2_URL" \
+                "$MD5_R1" "$MD5_R2" /shard/ref/pace-screen.fa 4
+            '
+          test -s "shard/out/${SAMPLE_ID}.candidate.R1.fastq.gz"
+          test -s "shard/out/${SAMPLE_ID}.candidate.R2.fastq.gz"
+          gzip -t "shard/out/${SAMPLE_ID}.candidate.R1.fastq.gz"
+          gzip -t "shard/out/${SAMPLE_ID}.candidate.R2.fastq.gz"
+          grep -q '^stream_interleaved_fastq=0$' "shard/out/${SAMPLE_ID}.pace-screen.pipeline-status.txt"
+          grep -q '^pair_range_filter=0$' "shard/out/${SAMPLE_ID}.pace-screen.pipeline-status.txt"
+          grep -q '^fastp=0$' "shard/out/${SAMPLE_ID}.pace-screen.pipeline-status.txt"
+          grep -q '^chunked_abismal_screen=0$' "shard/out/${SAMPLE_ID}.pace-screen.pipeline-status.txt"
+
+      - name: Build durable candidate checkpoint
+        run: |
+          set -euo pipefail
+          checkpoint="checkpoint-candidate-${PART}"
+          mkdir -p "$checkpoint"
+          cp "shard/out/${SAMPLE_ID}.candidate.R1.fastq.gz" "$checkpoint/"
+          cp "shard/out/${SAMPLE_ID}.candidate.R2.fastq.gz" "$checkpoint/"
+          cp "shard/out/${SAMPLE_ID}.candidate-pair-count.txt" "$checkpoint/"
+          cp "shard/out/${SAMPLE_ID}.pace-screen.pipeline-status.txt" "$checkpoint/"
+          cp "shard/out/${SAMPLE_ID}.pace-screen.range.stderr.log" "$checkpoint/"
+          cp "shard/out/${SAMPLE_ID}.pace-screen.source-stream.log" "$checkpoint/"
+          (
+            cd "$checkpoint"
+            sha256sum \
+              "${SAMPLE_ID}.candidate.R1.fastq.gz" \
+              "${SAMPLE_ID}.candidate.R2.fastq.gz" > SHA256SUMS
+          )
+          cat > "$checkpoint/checkpoint.json" <<EOF
+          {"sample_id":"${SAMPLE_ID}","stage":"candidate-${PART}","source_pair_start":${WGBS_PAIR_START},"source_pair_count":${WGBS_PAIR_COUNT},"source_r1_md5":"${MD5_R1}","source_r2_md5":"${MD5_R2}","run_accession":"${RUN_ACCESSION}","screen":"Abismal 3.3.0 PACE +/-2 kb -a -m 0.20; 4M bounded chunks","git_sha":"${GITHUB_SHA}"}
+          EOF
+
+      - name: Upload durable candidate checkpoint
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounty1-wgbs-v3-${{ env.SAMPLE_ID }}-candidate-${{ env.PART }}
+          path: checkpoint-candidate-${{ env.PART }}
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 30
+
+      - name: Upload compact diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounty1-wgbs-segmented-${{ env.SAMPLE_ID }}-${{ env.PART }}-diagnostics
+          path: |
+            shard/qc
+            shard/out/*.log
+            shard/out/*.txt
+            shard/out/*.json
+          if-no-files-found: warn
+          retention-days: 14

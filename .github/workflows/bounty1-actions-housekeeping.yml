@@ -1,0 +1,96 @@
+name: Bounty 1 Actions housekeeping
+
+on:
+  pull_request:
+    types: [synchronize]
+    paths:
+      - '.github/workflows/bounty1-actions-housekeeping.yml'
+      - '.github/workflows/bounty1-full-wgbs-benchmark.yml'
+      - '.github/workflows/bounty1-full-chromatin-benchmark.yml'
+      - '.github/workflows/bounty1-wgbs-cohort.yml'
+      - '.github/workflows/bounty1-wgbs-cohort-v2.yml'
+      - '.github/workflows/bounty1-wgbs-streaming-wt-pilot.yml'
+      - '.github/workflows/bounty1-chromatin-wt-sharded.yml'
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cancel-duplicate-expensive-runs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Keep at most one active run per expensive benchmark
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          clean_workflow() {
+            local workflow="$1"
+            local json
+            json=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?branch=${GITHUB_HEAD_REF}&per_page=50")
+
+            echo "Recent ${workflow} runs:"
+            jq -r '.workflow_runs[:5][] | "  id=\(.id) event=\(.event) status=\(.status) conclusion=\(.conclusion // "-") head=\(.head_sha) created=\(.created_at)"' \
+              <<<"$json"
+
+            mapfile -t in_progress < <(
+              jq -r '.workflow_runs[] | select(.status == "in_progress") | [.created_at, (.id|tostring)] | @tsv' \
+                <<<"$json" | sort | cut -f2
+            )
+            mapfile -t queued < <(
+              jq -r '.workflow_runs[] | select(.status == "queued" or .status == "requested" or .status == "waiting" or .status == "pending") | [.created_at, (.id|tostring)] | @tsv' \
+                <<<"$json" | sort | cut -f2
+            )
+
+            if (( ${#in_progress[@]} > 0 )); then
+              echo "${workflow}: active run ${in_progress[0]} exists; cancelling ${#queued[@]} queued duplicate(s)."
+              for run_id in "${queued[@]}"; do
+                gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/cancel" >/dev/null || true
+              done
+              return
+            fi
+
+            if (( ${#queued[@]} <= 1 )); then
+              echo "${workflow}: no duplicate queued runs."
+              return
+            fi
+
+            echo "${workflow}: keeping oldest queued run ${queued[0]} and cancelling later duplicates."
+            for run_id in "${queued[@]:1}"; do
+              gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/cancel" >/dev/null || true
+            done
+          }
+
+          supersede_legacy_wgbs_if_v2_exists() {
+            local v2 legacy
+            v2=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/bounty1-wgbs-cohort-v2.yml/runs?branch=${GITHUB_HEAD_REF}&per_page=20")
+            if ! jq -e '.workflow_runs[] | select(.status == "in_progress" or .status == "queued" or .status == "requested" or .status == "waiting" or .status == "pending")' \
+              <<<"$v2" >/dev/null; then
+              echo 'WGBS v2 has no active/pending run; legacy cohort left untouched.'
+              return
+            fi
+
+            legacy=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/bounty1-wgbs-cohort.yml/runs?branch=${GITHUB_HEAD_REF}&per_page=20")
+            mapfile -t legacy_active < <(
+              jq -r '.workflow_runs[] | select(.status == "in_progress" or .status == "queued" or .status == "requested" or .status == "waiting" or .status == "pending") | .id' \
+                <<<"$legacy"
+            )
+            for run_id in "${legacy_active[@]}"; do
+              echo "WGBS v2 supersedes legacy run ${run_id}; cancelling legacy run."
+              gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/cancel" >/dev/null || true
+            done
+          }
+
+          supersede_legacy_wgbs_if_v2_exists
+
+          clean_workflow bounty1-full-wgbs-benchmark.yml
+          clean_workflow bounty1-full-chromatin-benchmark.yml
+          clean_workflow bounty1-wgbs-cohort-v2.yml
+          clean_workflow bounty1-wgbs-streaming-wt-pilot.yml
+          clean_workflow bounty1-chromatin-wt-sharded.yml

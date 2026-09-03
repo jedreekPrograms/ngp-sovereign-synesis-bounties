@@ -1,0 +1,165 @@
+name: Bounty 1 final acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      data_deposit_doi:
+        description: "Persistent DOI for the real derived-data deposit"
+        required: true
+        type: string
+      chip_qc_run_id:
+        description: "Successful Bounty 1 ChIP QC workflow run containing bounty1-chip-seq-qc"
+        required: true
+        type: string
+      min_paired:
+        description: "Minimum fully paired real observations"
+        required: true
+        default: "6"
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  final_acceptance:
+    name: Real-data final acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout submission branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install finalization dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest scipy numpy pandas matplotlib reportlab pypdf
+
+      - name: Download measured ChIP-seq QC checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          name: bounty1-chip-seq-qc
+          path: bounty1/results/qc/chip
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.chip_qc_run_id }}
+
+      - name: Require measured production outputs
+        run: |
+          set -euo pipefail
+          test -s bounty1/results/pace/dunedinpace_scores.csv
+          test -s bounty1/results/pace/pace_probe_qc.csv
+          test -s bounty1/results/pace/pace_model_metadata.csv
+          test -s bounty1/results/chip/histone_occupancy.csv
+          test -s bounty1/results/correlations.json
+          test -s bounty1/results/qc/chip/chip_seq_qc.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path('bounty1/results/correlations.json')
+          data = json.loads(p.read_text())
+          if int(data.get('n_paired', 0)) < int('${{ inputs.min_paired }}'):
+              raise SystemExit(f"not enough paired observations: {data.get('n_paired')}")
+          for mark in ('H3K9ac', 'H3K56ac'):
+              r = data[f'{mark}_vs_DunedinPACE']['pearson_r']
+              pval = data[f'{mark}_vs_DunedinPACE']['p_value']
+              if not (r > 0.92 and pval < 0.01):
+                  raise SystemExit(f'{mark} acceptance not met: r={r}, p={pval}')
+          qc = json.loads(Path('bounty1/results/qc/chip/chip_seq_qc.json').read_text())
+          for mark in ('H3K9ac', 'H3K56ac'):
+              if not (float(qc[mark]['idr']) <= 0.05 and float(qc[mark]['nrf']) > 0.9):
+                  raise SystemExit(f"{mark} ChIP QC acceptance not met: {qc[mark]}")
+              if int(qc[mark].get('reproducible_peak_count', 0)) <= 0:
+                  raise SystemExit(f"{mark} has no measured IDR-reproducible peaks")
+          PY
+
+      - name: Build and export the real analysis image
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          docker build --pull -f bounty1/Dockerfile -t bounty1-pace:final bounty1
+          docker save bounty1-pace:final -o results/bounty1-pace-final.tar
+          test -s results/bounty1-pace-final.tar
+          md5sum results/bounty1-pace-final.tar | tee results/bounty1-pace-final.tar.md5
+          sha256sum results/bounty1-pace-final.tar | tee results/bounty1-pace-final.tar.sha256
+
+      - name: Build final machine-readable manifest
+        run: |
+          set -euo pipefail
+          python bounty1/bin/build_manifest.py \
+            --correlations bounty1/results/correlations.json \
+            --model-metadata bounty1/results/pace/pace_model_metadata.csv \
+            --chip-qc bounty1/results/qc/chip/chip_seq_qc.json \
+            --mapq 30 \
+            --peak-fdr 0.01 \
+            --cutrun-fdr 0.05 \
+            --sirt6-min-reciprocal-overlap 0.50 \
+            --doi '${{ inputs.data_deposit_doi }}' \
+            --docker-image results/bounty1-pace-final.tar \
+            --output results/manifest.json
+          test -s results/manifest.json
+
+      - name: Generate >=8-page supplementary evidence report
+        run: |
+          set -euo pipefail
+          python bounty1/bin/generate_report.py \
+            --scores bounty1/results/pace/dunedinpace_scores.csv \
+            --occupancy bounty1/results/chip/histone_occupancy.csv \
+            --correlations bounty1/results/correlations.json \
+            --manifest results/manifest.json \
+            --pace-qc bounty1/results/pace/pace_probe_qc.csv \
+            --output results/supplementary_report.pdf
+          test -s results/supplementary_report.pdf
+
+      - name: Copy measured evidence into final bundle
+        run: |
+          set -euo pipefail
+          cp bounty1/results/correlations.json results/correlations.json
+          cp bounty1/results/pace/dunedinpace_scores.csv results/dunedinpace_scores.csv
+          cp bounty1/results/pace/pace_probe_qc.csv results/pace_probe_qc.csv
+          cp bounty1/results/pace/pace_model_metadata.csv results/pace_model_metadata.csv
+          cp bounty1/results/chip/histone_occupancy.csv results/histone_occupancy.csv
+          cp bounty1/results/qc/chip/chip_seq_qc.json results/chip_seq_qc.json
+
+      - name: Strict literal bounty gate
+        run: |
+          set -euo pipefail
+          python bounty1/bin/validate_final_submission.py \
+            --manifest results/manifest.json \
+            --correlations results/correlations.json \
+            --scores results/dunedinpace_scores.csv \
+            --occupancy results/histone_occupancy.csv \
+            --pace-qc results/pace_probe_qc.csv \
+            --report results/supplementary_report.pdf \
+            --min-paired '${{ inputs.min_paired }}'
+
+      - name: Run organizer acceptance tests without skips
+        run: |
+          set -euo pipefail
+          pytest tests/test_bounty1_pace.py -v --tb=short -rs
+          python - <<'PY'
+          import subprocess
+          run = subprocess.run(
+              ['pytest', 'tests/test_bounty1_pace.py', '-q', '-rs'],
+              check=True,
+              text=True,
+              capture_output=True,
+          )
+          text = run.stdout + run.stderr
+          if 'skipped' in text.lower():
+              raise SystemExit('organizer acceptance suite contains skipped tests')
+          print(text)
+          PY
+
+      - name: Upload reproducible final submission bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounty1-final-submission-bundle
+          path: results/
+          if-no-files-found: warn
+          retention-days: 30

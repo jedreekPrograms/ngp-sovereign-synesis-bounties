@@ -1,0 +1,381 @@
+name: Bounty 1 WGBS cohort v3 checkpointed
+
+on:
+  workflow_dispatch:
+    inputs:
+      sample_regex:
+        description: Regex selecting WGBS sample IDs from resources/samplesheet.csv
+        required: true
+        default: '^(WT|SIRT[1-7])_rep[12]_WGBS$'
+      max_parallel:
+        description: Maximum number of WGBS samples to process concurrently
+        required: true
+        default: '4'
+  push:
+    branches:
+      - bounty-1-real-pipeline
+    paths:
+      - 'bounty1/cohort-v3.trigger'
+
+permissions:
+  contents: read
+  actions: read
+
+# Deliberately independent of the live v2 concurrency group. Merely adding or
+# testing this workflow must never cancel the currently useful v2 cohort.
+concurrency:
+  group: bounty1-wgbs-cohort-v3-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: matrix
+        env:
+          SAMPLE_REGEX: ${{ inputs.sample_regex || '^(WT|SIRT[1-7])_rep[12]_WGBS$' }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import csv, json, os, re
+          pattern = re.compile(os.environ['SAMPLE_REGEX'])
+          rows = []
+          with open('bounty1/resources/samplesheet.csv', newline='', encoding='utf-8') as fh:
+              for row in csv.DictReader(fh):
+                  if row['assay'] != 'WGBS' or not pattern.search(row['sample_id']):
+                      continue
+                  rows.append({
+                      'sample_id': row['sample_id'],
+                      'condition': row['condition'],
+                      'replicate': row['replicate'],
+                      'r1': row['fastq_1'],
+                      'r2': row['fastq_2'],
+                      'md5_r1': row['read1_md5'],
+                      'md5_r2': row['read2_md5'],
+                      'run_accession': row['run_accession'],
+                  })
+          if not rows:
+              raise SystemExit('sample_regex selected no WGBS rows')
+          print('matrix=' + json.dumps({'include': rows}, separators=(',', ':')))
+          PY
+
+  wgbs:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(inputs.max_parallel || '4') }}
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      SAMPLE_ID: ${{ matrix.sample_id }}
+      CONDITION: ${{ matrix.condition }}
+      REPLICATE: ${{ matrix.replicate }}
+      RUN_ACCESSION: ${{ matrix.run_accession }}
+      R1_URL: ${{ matrix.r1 }}
+      R2_URL: ${{ matrix.r2 }}
+      MD5_R1: ${{ matrix.md5_r1 }}
+      MD5_R2: ${{ matrix.md5_r2 }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore newest valid checkpoint from this or an older run
+        id: restore
+        run: |
+          set -euo pipefail
+          mkdir -p shard/out shard/qc restored
+
+          restore_named_artifact() {
+            local name="$1" dest="$2" url
+            mkdir -p "$dest"
+            if gh run download "$GITHUB_RUN_ID" -n "$name" -D "$dest" >/dev/null 2>&1; then
+              echo "restored same-run artifact: $name"
+              return 0
+            fi
+            url=$(gh api "/repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${name}&per_page=20" \
+              --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | reverse | .[0].archive_download_url // empty')
+            if [[ -z "$url" ]]; then
+              return 1
+            fi
+            curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "$url" -o /tmp/checkpoint.zip
+            unzip -q /tmp/checkpoint.zip -d "$dest"
+            rm -f /tmp/checkpoint.zip
+            echo "restored cross-run artifact: $name"
+          }
+
+          # Prefer the furthest checkpoint. v3 artifacts carry SHA256SUMS.
+          if restore_named_artifact "bounty1-wgbs-v3-${SAMPLE_ID}-coverage" restored/coverage; then
+            (cd restored/coverage && sha256sum -c SHA256SUMS)
+            cp restored/coverage/${SAMPLE_ID}.bismark.cov.gz shard/qc/
+            echo 'stage=coverage' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # A completely successful v2 sample is also a valid terminal checkpoint.
+          if restore_named_artifact "bounty1-wgbs-v2-${SAMPLE_ID}" restored/v2; then
+            cov=$(find restored/v2 -type f -name "${SAMPLE_ID}.bismark.cov.gz" -print -quit || true)
+            if [[ -n "$cov" ]]; then
+              gzip -t "$cov"
+              cp "$cov" shard/qc/${SAMPLE_ID}.bismark.cov.gz
+              echo 'stage=coverage-v2' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          if restore_named_artifact "bounty1-wgbs-v3-${SAMPLE_ID}-bam" restored/bam; then
+            (cd restored/bam && sha256sum -c SHA256SUMS)
+            cp restored/bam/${SAMPLE_ID}.mapq30.pace-targets.deduplicated.bam shard/out/
+            cp restored/bam/${SAMPLE_ID}.mapq30.pace-targets.deduplicated.bam.bai shard/out/
+            echo 'stage=bam' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if restore_named_artifact "bounty1-wgbs-v3-${SAMPLE_ID}-candidate" restored/candidate; then
+            (cd restored/candidate && sha256sum -c SHA256SUMS)
+            cp restored/candidate/${SAMPLE_ID}.candidate.R1.fastq.gz shard/out/
+            cp restored/candidate/${SAMPLE_ID}.candidate.R2.fastq.gz shard/out/
+            gzip -t shard/out/${SAMPLE_ID}.candidate.R1.fastq.gz
+            gzip -t shard/out/${SAMPLE_ID}.candidate.R2.fastq.gz
+            echo 'stage=candidate' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo 'stage=none' >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.restore.outputs.stage != 'coverage' && steps.restore.outputs.stage != 'coverage-v2'
+
+      - name: Load pinned analysis image from shared cache
+        if: steps.restore.outputs.stage != 'coverage' && steps.restore.outputs.stage != 'coverage-v2'
+        uses: docker/build-push-action@v6
+        with:
+          context: bounty1
+          load: true
+          pull: true
+          tags: bounty1-pace:wgbs-cohort-v3
+          cache-from: type=gha,scope=bounty1-docker
+          cache-to: type=gha,mode=max,scope=bounty1-docker
+
+      - name: Prepare verified hg19 reference and download source only if needed
+        if: steps.restore.outputs.stage != 'coverage' && steps.restore.outputs.stage != 'coverage-v2'
+        run: |
+          set -euo pipefail
+          mkdir -p shard/ref shard/raw shard/out shard/qc
+
+          prepare_reference() {
+            curl -fsSL --retry 10 --retry-delay 5 --retry-all-errors \
+              -o shard/ref/hg19.fa.gz \
+              https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz
+            curl -fsSL --retry 10 --retry-delay 5 --retry-all-errors \
+              -o shard/ref/md5sum.txt \
+              https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/md5sum.txt
+            (
+              cd shard/ref
+              grep -E '[[:space:]]hg19.fa.gz$' md5sum.txt > hg19.fa.gz.md5
+              md5sum --check hg19.fa.gz.md5
+              gzip -d hg19.fa.gz
+            )
+            docker run --rm -v "$PWD/shard:/shard" bounty1-pace:wgbs-cohort-v3 bash -lc '
+              set -euo pipefail
+              samtools faidx /shard/ref/hg19.fa
+              Rscript /work/bin/export_pace_regions.R --output /shard/ref/pace.bed --flank 500
+              Rscript /work/bin/export_pace_regions.R --output /shard/ref/pace-screen.raw.bed --flank 1000
+            '
+            python3 - <<'PY'
+          from collections import defaultdict
+          from pathlib import Path
+          src = Path('shard/ref/pace-screen.raw.bed')
+          dst = Path('shard/ref/pace-screen.merged.bed')
+          by_chrom = defaultdict(list)
+          for line in src.read_text(encoding='utf-8').splitlines():
+              if not line or line.startswith('#'):
+                  continue
+              f = line.split('\t')
+              by_chrom[f[0]].append((int(f[1]), int(f[2])))
+          with dst.open('w', encoding='utf-8') as out:
+              for chrom in sorted(by_chrom):
+                  merged = []
+                  for start, end in sorted(by_chrom[chrom]):
+                      if not merged or start > merged[-1][1]:
+                          merged.append([start, end])
+                      else:
+                          merged[-1][1] = max(merged[-1][1], end)
+                  for start, end in merged:
+                      out.write(f'{chrom}\t{start}\t{end}\n')
+          PY
+            docker run --rm -v "$PWD/shard:/shard" bounty1-pace:wgbs-cohort-v3 bash -lc '
+              set -euo pipefail
+              : > /shard/ref/pace-screen.fa
+              while read -r chrom start end; do
+                samtools faidx /shard/ref/hg19.fa "${chrom}:$((start + 1))-${end}"
+              done < /shard/ref/pace-screen.merged.bed >> /shard/ref/pace-screen.fa
+              test -s /shard/ref/pace-screen.fa
+              samtools faidx /shard/ref/pace-screen.fa
+              bwameth.py index /shard/ref/pace-screen.fa
+              bwameth.py index /shard/ref/hg19.fa
+            '
+          }
+
+          download_one() {
+            local label="$1" url="$2" path="$3" expected="$4" attempt status
+            for attempt in $(seq 1 100); do
+              echo "${label}: resume attempt ${attempt}/100" >&2
+              set +e
+              curl --fail --location --show-error --silent --http1.1 \
+                --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
+                --speed-time 120 --speed-limit 1024 \
+                --continue-at - --output "$path" "$url"
+              status=$?
+              set -e
+              if (( status == 0 )) && echo "${expected}  ${path}" | md5sum --check && gzip -t "$path"; then
+                return 0
+              fi
+              sleep 5
+            done
+            return 1
+          }
+
+          prepare_reference > shard/qc/reference-prep.log 2>&1 &
+          ref_pid=$!
+
+          if [[ '${{ steps.restore.outputs.stage }}' == 'none' ]]; then
+            download_one R1 "$R1_URL" "shard/raw/${SAMPLE_ID}.R1.fastq.gz" "$MD5_R1" > shard/qc/download.R1.log 2>&1 & p1=$!
+            download_one R2 "$R2_URL" "shard/raw/${SAMPLE_ID}.R2.fastq.gz" "$MD5_R2" > shard/qc/download.R2.log 2>&1 & p2=$!
+            set +e
+            wait "$p1"; s1=$?
+            wait "$p2"; s2=$?
+            set -e
+            (( s1 == 0 && s2 == 0 )) || { echo "FASTQ download failed: R1=${s1} R2=${s2}"; exit 1; }
+          fi
+
+          wait "$ref_pid"
+          echo 'reference_ready=1' > shard/qc/reference-ready.txt
+
+      - name: Prefilter complete WGBS to conservative PACE candidates
+        if: steps.restore.outputs.stage == 'none'
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -e SAMPLE_ID -e MD5_R1 -e MD5_R2 \
+            -v "$PWD/shard:/shard" bounty1-pace:wgbs-cohort-v3 bash -lc '
+              set -euo pipefail
+              cd /shard/out
+              bash /work/bin/screen_wgbs_pace_candidates.sh \
+                "$SAMPLE_ID" "/shard/raw/${SAMPLE_ID}.R1.fastq.gz" "/shard/raw/${SAMPLE_ID}.R2.fastq.gz" \
+                "$MD5_R1" "$MD5_R2" /shard/ref/pace-screen.fa 4
+            '
+          test -s "shard/out/${SAMPLE_ID}.candidate.R1.fastq.gz"
+          test -s "shard/out/${SAMPLE_ID}.candidate.R2.fastq.gz"
+          gzip -t "shard/out/${SAMPLE_ID}.candidate.R1.fastq.gz"
+          gzip -t "shard/out/${SAMPLE_ID}.candidate.R2.fastq.gz"
+          rm -f "shard/raw/${SAMPLE_ID}.R1.fastq.gz" "shard/raw/${SAMPLE_ID}.R2.fastq.gz"
+
+      - name: Build candidate checkpoint manifest
+        if: steps.restore.outputs.stage == 'none'
+        run: |
+          set -euo pipefail
+          mkdir -p checkpoint-candidate
+          cp "shard/out/${SAMPLE_ID}.candidate.R1.fastq.gz" checkpoint-candidate/
+          cp "shard/out/${SAMPLE_ID}.candidate.R2.fastq.gz" checkpoint-candidate/
+          (cd checkpoint-candidate && sha256sum "${SAMPLE_ID}.candidate.R1.fastq.gz" "${SAMPLE_ID}.candidate.R2.fastq.gz" > SHA256SUMS)
+          cat > checkpoint-candidate/checkpoint.json <<EOF
+          {"sample_id":"${SAMPLE_ID}","stage":"candidate","source_r1_md5":"${MD5_R1}","source_r2_md5":"${MD5_R2}","run_accession":"${RUN_ACCESSION}","git_sha":"${GITHUB_SHA}"}
+          EOF
+
+      - name: Upload candidate checkpoint
+        if: steps.restore.outputs.stage == 'none'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounty1-wgbs-v3-${{ matrix.sample_id }}-candidate
+          path: checkpoint-candidate
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+
+      - name: Align candidates to complete hg19 and retain sample-level dedup semantics
+        if: steps.restore.outputs.stage == 'none' || steps.restore.outputs.stage == 'candidate'
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -e SAMPLE_ID -e WGBS_SKIP_FASTP=1 -e WGBS_SORT_MEM=256M \
+            -v "$PWD/shard:/shard" bounty1-pace:wgbs-cohort-v3 bash -lc '
+              set -euo pipefail
+              cd /shard/out
+              bash /work/bin/stream_wgbs_bwameth.sh \
+                "$SAMPLE_ID" "${SAMPLE_ID}.candidate.R1.fastq.gz" "${SAMPLE_ID}.candidate.R2.fastq.gz" \
+                "" "" /shard/ref/hg19.fa /shard/ref/pace.bed 30 4
+            '
+          test -s "shard/out/${SAMPLE_ID}.mapq30.pace-targets.deduplicated.bam"
+          test -s "shard/out/${SAMPLE_ID}.mapq30.pace-targets.deduplicated.bam.bai"
+
+      - name: Build BAM checkpoint manifest
+        if: steps.restore.outputs.stage == 'none' || steps.restore.outputs.stage == 'candidate'
+        run: |
+          set -euo pipefail
+          mkdir -p checkpoint-bam
+          cp "shard/out/${SAMPLE_ID}.mapq30.pace-targets.deduplicated.bam" checkpoint-bam/
+          cp "shard/out/${SAMPLE_ID}.mapq30.pace-targets.deduplicated.bam.bai" checkpoint-bam/
+          (cd checkpoint-bam && sha256sum "${SAMPLE_ID}.mapq30.pace-targets.deduplicated.bam" "${SAMPLE_ID}.mapq30.pace-targets.deduplicated.bam.bai" > SHA256SUMS)
+          cat > checkpoint-bam/checkpoint.json <<EOF
+          {"sample_id":"${SAMPLE_ID}","stage":"bam","final_reference":"UCSC hg19","mapq":30,"git_sha":"${GITHUB_SHA}"}
+          EOF
+
+      - name: Upload BAM checkpoint
+        if: steps.restore.outputs.stage == 'none' || steps.restore.outputs.stage == 'candidate'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounty1-wgbs-v3-${{ matrix.sample_id }}-bam
+          path: checkpoint-bam
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+
+      - name: Extract PACE-region CpG methylation
+        if: steps.restore.outputs.stage != 'coverage' && steps.restore.outputs.stage != 'coverage-v2'
+        run: |
+          set -euo pipefail
+          docker run --rm -e SAMPLE_ID -v "$PWD/shard:/shard" bounty1-pace:wgbs-cohort-v3 bash -lc '
+            set -euo pipefail
+            cd /shard/out
+            micromamba run -n methyldackel MethylDackel extract \
+              -q 30 -p 5 --minDepth 1 -@ 2 /shard/ref/hg19.fa \
+              "${SAMPLE_ID}.mapq30.pace-targets.deduplicated.bam" -o "${SAMPLE_ID}.methyldackel"
+            test -s "${SAMPLE_ID}.methyldackel_CpG.bedGraph"
+            python3 /work/bin/methyldackel_to_bismark.py \
+              --input "${SAMPLE_ID}.methyldackel_CpG.bedGraph" \
+              --output "/shard/qc/${SAMPLE_ID}.bismark.cov.gz"
+            gzip -t "/shard/qc/${SAMPLE_ID}.bismark.cov.gz"
+            test "$(gzip -cd "/shard/qc/${SAMPLE_ID}.bismark.cov.gz" | wc -l)" -gt 0
+          '
+
+      - name: Build terminal coverage checkpoint
+        if: always()
+        run: |
+          set -euo pipefail
+          cov="shard/qc/${SAMPLE_ID}.bismark.cov.gz"
+          test -s "$cov"
+          gzip -t "$cov"
+          mkdir -p checkpoint-coverage
+          cp "$cov" checkpoint-coverage/
+          (cd checkpoint-coverage && sha256sum "${SAMPLE_ID}.bismark.cov.gz" > SHA256SUMS)
+          rows=$(gzip -cd "$cov" | wc -l)
+          cat > checkpoint-coverage/checkpoint.json <<EOF
+          {"sample_id":"${SAMPLE_ID}","condition":"${CONDITION}","replicate":"${REPLICATE}","stage":"coverage","coverage_rows":${rows},"source_r1_md5":"${MD5_R1}","source_r2_md5":"${MD5_R2}","final_reference":"UCSC hg19","mapq":30,"methylation_min_depth_raw":1,"dunedinpace_min_depth":6,"git_sha":"${GITHUB_SHA}"}
+          EOF
+
+      - name: Upload terminal coverage checkpoint
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounty1-wgbs-v3-${{ matrix.sample_id }}-coverage
+          path: checkpoint-coverage
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90

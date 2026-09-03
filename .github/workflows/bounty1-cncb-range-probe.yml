@@ -1,0 +1,41 @@
+name: Bounty 1 CNCB range probe
+
+on:
+  push:
+    branches:
+      - bounty-1-real-pipeline
+    paths:
+      - '.github/workflows/bounty1-cncb-range-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe-range:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Probe CNCB byte-range behavior
+        env:
+          URL: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202754/HRR1202754_f1.fq.gz
+        run: |
+          set -euo pipefail
+          echo '=== HEAD ==='
+          curl -fsSIL --http1.1 "$URL" | tee headers.txt
+          echo '=== RANGE 0-1048575 ==='
+          code=$(curl -fsSL --http1.1 --range 0-1048575 -D range0.headers -o range0.bin -w '%{http_code}' "$URL")
+          echo "http_code=$code"
+          cat range0.headers
+          stat -c 'bytes=%s' range0.bin
+          echo '=== RANGE 1048576-2097151 ==='
+          code2=$(curl -fsSL --http1.1 --range 1048576-2097151 -D range1.headers -o range1.bin -w '%{http_code}' "$URL")
+          echo "http_code=$code2"
+          cat range1.headers
+          stat -c 'bytes=%s' range1.bin
+          test "$code" = '206'
+          test "$code2" = '206'
+          test "$(stat -c %s range0.bin)" -eq 1048576
+          test "$(stat -c %s range1.bin)" -eq 1048576
+          cmp -s range0.bin range1.bin && { echo 'Unexpected identical adjacent ranges'; exit 1; } || true
+          echo 'RANGE_SUPPORTED=1'

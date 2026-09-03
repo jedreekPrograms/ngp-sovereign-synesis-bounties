@@ -1,0 +1,4 @@
+sample_id,condition,replicate,assay,mark,fastq_1,fastq_2
+WT_INPUT,WT,0,INPUT,,tests/fixtures/stub_R1.fastq.gz,tests/fixtures/stub_R2.fastq.gz
+SIRT1_INPUT,SIRT1,0,INPUT,,tests/fixtures/stub_R1.fastq.gz,tests/fixtures/stub_R2.fastq.gz
+SIRT2_INPUT,SIRT2,0,INPUT,,tests/fixtures/stub_R1.fastq.gz,tests/fixtures/stub_R2.fastq.gz

@@ -1,0 +1,3 @@
+Relaunch the full 16-sample HRA003336 WGBS cohort using the conservative PACE-candidate prefilter workflow.
+
+The first cohort attempt showed two operational bottlenecks on GitHub-hosted runners: intermittent CNCB transfer resets and a +/-10 kb bisulfite screen that could consume the remainder of the 355-minute per-job budget. The production screen now derives a +/-1 kb target reference from the official +/-500 bp DunedinPACE windows before final full-hg19 alignment. Final candidate alignments still use complete checksum-verified hg19 and MAPQ >= 30; the prefilter only reduces the reads sent to that expensive step.

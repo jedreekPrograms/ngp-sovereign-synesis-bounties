@@ -1,0 +1,27 @@
+name: Bounty 1 local runner syntax
+
+on:
+  pull_request:
+    paths:
+      - 'bounty1/run_local_wgbs_msys2.sh'
+      - 'bounty1/bin/benchmark_wgbs_prefilters.sh'
+      - '.github/workflows/bounty1-local-runner-syntax.yml'
+  push:
+    paths:
+      - 'bounty1/run_local_wgbs_msys2.sh'
+      - 'bounty1/bin/benchmark_wgbs_prefilters.sh'
+      - '.github/workflows/bounty1-local-runner-syntax.yml'
+
+jobs:
+  bash-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate shell syntax
+        run: |
+          bash -n bounty1/run_local_wgbs_msys2.sh
+          bash -n bounty1/bin/benchmark_wgbs_prefilters.sh
+      - name: Validate production WGBS selection
+        run: |
+          count=$(awk -F',' 'NR>1 && $4=="WGBS" {n++} END{print n+0}' bounty1/resources/samplesheet.csv)
+          test "$count" -eq 16

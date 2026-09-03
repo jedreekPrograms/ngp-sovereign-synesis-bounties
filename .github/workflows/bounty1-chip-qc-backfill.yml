@@ -1,0 +1,110 @@
+name: Bounty 1 ChIP QC from durable checkpoints
+
+on:
+  workflow_dispatch:
+    inputs:
+      alignment_artifact_ids:
+        description: "Comma-separated durable artifact IDs containing pre-dedup *.position.bam shards"
+        required: true
+        type: string
+      peak_artifact_ids:
+        description: "Comma-separated artifact IDs containing final MACS3 *_peaks.narrowPeak files"
+        required: true
+        type: string
+      mapq:
+        description: "MAPQ threshold used by production chromatin pipeline"
+        required: true
+        default: "30"
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: bounty1-chip-qc-backfill
+  cancel-in-progress: false
+
+jobs:
+  qc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Load pinned analysis image including official IDR
+        uses: docker/build-push-action@v6
+        with:
+          context: bounty1
+          load: true
+          pull: true
+          tags: bounty1-pace:chip-qc
+          cache-from: type=gha,scope=bounty1-docker
+
+      - name: Download only explicitly selected durable artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ALIGNMENT_IDS: ${{ inputs.alignment_artifact_ids }}
+          PEAK_IDS: ${{ inputs.peak_artifact_ids }}
+        run: |
+          set -euo pipefail
+          mkdir -p qc-input/{alignment,peaks}
+          download_ids() {
+            kind="$1"
+            csv="$2"
+            IFS=',' read -ra ids <<< "$csv"
+            test "${#ids[@]}" -gt 0
+            for raw in "${ids[@]}"; do
+              id="$(echo "$raw" | xargs)"
+              [[ "$id" =~ ^[0-9]+$ ]] || { echo "invalid artifact id: $id" >&2; exit 2; }
+              mkdir -p "qc-input/$kind/$id"
+              curl -fL --retry 4 --retry-delay 3 \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}/zip" \
+                -o "/tmp/${kind}-${id}.zip"
+              unzip -q "/tmp/${kind}-${id}.zip" -d "qc-input/$kind/$id"
+              rm -f "/tmp/${kind}-${id}.zip"
+            done
+          }
+          download_ids alignment "$ALIGNMENT_IDS"
+          download_ids peaks "$PEAK_IDS"
+          mapfile -t positions < <(find qc-input/alignment -type f -name '*.position.bam' | sort)
+          mapfile -t peaks < <(find qc-input/peaks -type f -name '*_peaks.narrowPeak' | sort)
+          test "${#positions[@]}" -gt 0
+          test "${#peaks[@]}" -ge 4
+          printf '%s\n' "${positions[@]}" | tee qc-input/position-bams.list.txt
+          printf '%s\n' "${peaks[@]}" | tee qc-input/peaks.list.txt
+
+      - name: Compute measured NRF and IDR fail closed
+        run: |
+          set -euo pipefail
+          mkdir -p qc-output
+          docker run --rm \
+            -v "$PWD/qc-input:/input:ro" \
+            -v "$PWD/qc-output:/output" \
+            bounty1-pace:chip-qc bash -lc '
+              set -euo pipefail
+              python /work/bin/compute_chip_qc.py \
+                --position-bam-glob "/input/alignment/**/*.position.bam" \
+                --peaks-glob "/input/peaks/**/*_peaks.narrowPeak" \
+                --mapq "${{ inputs.mapq }}" \
+                --idr-threshold 0.05 \
+                --idr-command "micromamba run -n idr idr" \
+                --threads 4 \
+                --output /output/chip_seq_qc.json
+            '
+          test -s qc-output/chip_seq_qc.json
+          python -m json.tool qc-output/chip_seq_qc.json
+          sha256sum qc-output/chip_seq_qc.json > qc-output/chip_seq_qc.json.sha256
+
+      - name: Upload measured ChIP QC checkpoint
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounty1-chip-seq-qc
+          path: qc-output/
+          if-no-files-found: error
+          retention-days: 30

@@ -1,0 +1,246 @@
+name: Bounty 1 WGBS Abismal truth benchmark
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/bounty1-wgbs-abismal-truth-benchmark.yml'
+      - 'bounty1/Dockerfile'
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Load pinned analysis image from shared cache
+        uses: docker/build-push-action@v6
+        with:
+          context: bounty1
+          load: true
+          pull: true
+          tags: bounty1-pace:abismal-truth-bench
+          cache-from: type=gha,scope=bounty1-docker
+          cache-to: type=gha,mode=max,scope=bounty1-docker
+
+      - name: Prepare 100k real WT pairs and verified hg19
+        run: |
+          set -euo pipefail
+          mkdir -p bench/ref bench/raw bench/out
+          python3 - <<'PY'
+          import gzip, urllib.request
+          from pathlib import Path
+
+          urls = {
+              'R1': 'https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202754/HRR1202754_f1.fq.gz',
+              'R2': 'https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202754/HRR1202754_r2.fq.gz',
+          }
+          n = 100_000
+          for mate, url in urls.items():
+              out = Path(f'bench/raw/WT_rep1.{mate}.fastq.gz')
+              req = urllib.request.Request(url, headers={'User-Agent': 'bounty1-abismal-truth-benchmark/1'})
+              with urllib.request.urlopen(req, timeout=60) as resp, gzip.GzipFile(fileobj=resp) as src, gzip.open(out, 'wb', compresslevel=1) as dst:
+                  for _ in range(n):
+                      rec = [src.readline() for _ in range(4)]
+                      if any(not x for x in rec):
+                          raise SystemExit(f'{mate}: source ended before {n} records')
+                      dst.writelines(rec)
+          PY
+          gzip -t bench/raw/WT_rep1.R1.fastq.gz
+          gzip -t bench/raw/WT_rep1.R2.fastq.gz
+
+          curl -fsSL --retry 10 --retry-delay 5 --retry-all-errors \
+            -o bench/ref/hg19.fa.gz https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz
+          curl -fsSL --retry 10 --retry-delay 5 --retry-all-errors \
+            -o bench/ref/md5sum.txt https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/md5sum.txt
+          (
+            cd bench/ref
+            grep -E '[[:space:]]hg19.fa.gz$' md5sum.txt > hg19.fa.gz.md5
+            md5sum --check hg19.fa.gz.md5
+            gzip -d hg19.fa.gz
+          )
+
+          docker run --rm -v "$PWD/bench:/bench" bounty1-pace:abismal-truth-bench bash -lc '
+            set -euo pipefail
+            samtools faidx /bench/ref/hg19.fa
+            Rscript /work/bin/export_pace_regions.R --output /bench/ref/pace.bed --flank 500
+          '
+
+          # Production Abismal screening uses total +/-2 kb context around each
+          # DunedinPACE probe. pace.bed already contains +/-500 bp, so add 1500 bp.
+          python3 - <<'PY'
+          from collections import defaultdict
+          from pathlib import Path
+          src=Path('bench/ref/pace.bed'); dst=Path('bench/ref/pace-screen.merged.bed')
+          by=defaultdict(list)
+          for line in src.read_text().splitlines():
+              if not line or line.startswith('#'): continue
+              f=line.split('\t'); by[f[0]].append((max(0,int(f[1])-1500),int(f[2])+1500))
+          with dst.open('w') as out:
+              for chrom in sorted(by):
+                  merged=[]
+                  for s,e in sorted(by[chrom]):
+                      if not merged or s>merged[-1][1]: merged.append([s,e])
+                      else: merged[-1][1]=max(merged[-1][1],e)
+                  for s,e in merged: out.write(f'{chrom}\t{s}\t{e}\n')
+          PY
+
+          docker run --rm -v "$PWD/bench:/bench" bounty1-pace:abismal-truth-bench bash -lc '
+            set -euo pipefail
+            : > /bench/ref/pace-screen.fa
+            while read -r chrom start end; do
+              samtools faidx /bench/ref/hg19.fa "${chrom}:$((start+1))-${end}"
+            done < /bench/ref/pace-screen.merged.bed >> /bench/ref/pace-screen.fa
+            test -s /bench/ref/pace-screen.fa
+            samtools faidx /bench/ref/pace-screen.fa
+            bwameth.py index /bench/ref/pace-screen.fa
+            bwameth.py index /bench/ref/hg19.fa
+            micromamba run -n abismal abismal idx -t 4 /bench/ref/pace-screen.fa /bench/ref/pace-screen.abismal.idx
+          '
+
+      - name: Fastp benchmark input once
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/bench:/bench" bounty1-pace:abismal-truth-bench bash -lc '
+            set -euo pipefail
+            fastp -i /bench/raw/WT_rep1.R1.fastq.gz -I /bench/raw/WT_rep1.R2.fastq.gz \
+              -o /bench/raw/WT_rep1.clean.R1.fastq.gz -O /bench/raw/WT_rep1.clean.R2.fastq.gz \
+              --thread 2 --json /bench/out/fastp.json --html /bench/out/fastp.html
+          '
+
+      - name: Build full-hg19 MAPQ30 PACE truth set
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          docker run --rm -v "$PWD/bench:/bench" bounty1-pace:abismal-truth-bench bash -lc '
+            set -euo pipefail
+            cd /bench/out
+            python3 /work/bin/stream_interleaved_fastq.py \
+              --r1-source /bench/raw/WT_rep1.clean.R1.fastq.gz \
+              --r2-source /bench/raw/WT_rep1.clean.R2.fastq.gz | \
+            bwameth.py --threads 4 --interleaved --reference /bench/ref/hg19.fa /dev/stdin 2> truth.bwameth.stderr.log | \
+            samtools view -bh -F SECONDARY,SUPPLEMENTARY -q 30 -L /bench/ref/pace.bed - | \
+            samtools view - | cut -f1 | sort -u > truth.names.txt
+            test -s truth.names.txt
+          '
+          end=$(date +%s)
+          echo $((end-start)) > bench/out/truth.seconds.txt
+
+      - name: Benchmark current target-only bwa-meth screen
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          docker run --rm -v "$PWD/bench:/bench" bounty1-pace:abismal-truth-bench bash -lc '
+            set -euo pipefail
+            cd /bench/out
+            python3 /work/bin/stream_interleaved_fastq.py \
+              --r1-source /bench/raw/WT_rep1.clean.R1.fastq.gz \
+              --r2-source /bench/raw/WT_rep1.clean.R2.fastq.gz | \
+            bwameth.py --threads 4 --interleaved --reference /bench/ref/pace-screen.fa /dev/stdin 2> screen.bwameth.stderr.log | \
+            samtools view -h -F SECONDARY,SUPPLEMENTARY -e "!(flag.unmap && flag.munmap)" - | \
+            samtools view - | cut -f1 | sort -u > bwameth-screen.names.txt
+            test -s bwameth-screen.names.txt
+          '
+          end=$(date +%s)
+          echo $((end-start)) > bench/out/bwameth-screen.seconds.txt
+
+      - name: Benchmark permissive Abismal rescue screens
+        run: |
+          set -euo pipefail
+          for spec in 'ambig|-a' 'm15|-a -m 0.15' 'm20|-a -m 0.20' 'm25|-a -m 0.25' 'm30|-a -m 0.30'; do
+            name=${spec%%|*}
+            flags=${spec#*|}
+            start=$(date +%s)
+            docker run --rm -v "$PWD/bench:/bench" bounty1-pace:abismal-truth-bench bash -lc "
+              set -euo pipefail
+              cd /bench/out
+              micromamba run -n abismal abismal map \
+                -i /bench/ref/pace-screen.abismal.idx -t 4 ${flags} \
+                -s abismal-${name}.stats.yaml -o abismal-${name}.sam \
+                /bench/raw/WT_rep1.clean.R1.fastq.gz /bench/raw/WT_rep1.clean.R2.fastq.gz \
+                2> abismal-${name}.stderr.log
+              test -s abismal-${name}.sam
+            "
+            end=$(date +%s)
+            echo $((end-start)) > "bench/out/abismal-${name}.seconds.txt"
+          done
+
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          for name in ('ambig', 'm15', 'm20', 'm25', 'm30'):
+              sam = Path(f'bench/out/abismal-{name}.sam')
+              names = set()
+              with sam.open(encoding='utf-8') as fh:
+                  for line in fh:
+                      if not line or line.startswith('@'):
+                          continue
+                      f = line.rstrip('\n').split('\t')
+                      if len(f) < 11:
+                          raise SystemExit(f'invalid Abismal SAM for {name}')
+                      if int(f[1]) & 4:
+                          continue
+                      names.add(re.sub(r'/[12]$', '', f[0]))
+              if not names:
+                  raise SystemExit(f'Abismal {name} retained zero mapped reads')
+              Path(f'bench/out/abismal-{name}.names.txt').write_text(
+                  '\n'.join(sorted(names)) + '\n', encoding='utf-8'
+              )
+              sam.unlink()
+          PY
+
+      - name: Compare rescue screens against full-hg19 truth fail-closed
+        run: |
+          set -euo pipefail
+          comm -23 bench/out/truth.names.txt bench/out/bwameth-screen.names.txt > bench/out/truth-missed-by-bwameth-screen.txt
+          for name in ambig m15 m20 m25 m30; do
+            comm -23 bench/out/truth.names.txt "bench/out/abismal-${name}.names.txt" > "bench/out/truth-missed-by-abismal-${name}.txt"
+          done
+
+          truth=$(wc -l < bench/out/truth.names.txt)
+          bw=$(wc -l < bench/out/bwameth-screen.names.txt)
+          bwmiss=$(wc -l < bench/out/truth-missed-by-bwameth-screen.txt)
+          ambig=$(wc -l < bench/out/abismal-ambig.names.txt)
+          m15=$(wc -l < bench/out/abismal-m15.names.txt)
+          m20=$(wc -l < bench/out/abismal-m20.names.txt)
+          m25=$(wc -l < bench/out/abismal-m25.names.txt)
+          m30=$(wc -l < bench/out/abismal-m30.names.txt)
+          ambigmiss=$(wc -l < bench/out/truth-missed-by-abismal-ambig.txt)
+          m15miss=$(wc -l < bench/out/truth-missed-by-abismal-m15.txt)
+          m20miss=$(wc -l < bench/out/truth-missed-by-abismal-m20.txt)
+          m25miss=$(wc -l < bench/out/truth-missed-by-abismal-m25.txt)
+          m30miss=$(wc -l < bench/out/truth-missed-by-abismal-m30.txt)
+
+          printf 'reads_per_mate=100000\nscreen_context_bp=2000\nfull_hg19_mapq30_pace_truth=%s\nbwameth_screen_candidates=%s\ntruth_missed_by_bwameth_screen=%s\nbwameth_screen_seconds=%s\nabismal_ambig_candidates=%s\ntruth_missed_by_abismal_ambig=%s\nabismal_ambig_seconds=%s\nabismal_m15_candidates=%s\ntruth_missed_by_abismal_m15=%s\nabismal_m15_seconds=%s\nabismal_m20_candidates=%s\ntruth_missed_by_abismal_m20=%s\nabismal_m20_seconds=%s\nabismal_m25_candidates=%s\ntruth_missed_by_abismal_m25=%s\nabismal_m25_seconds=%s\nabismal_m30_candidates=%s\ntruth_missed_by_abismal_m30=%s\nabismal_m30_seconds=%s\ntruth_seconds=%s\n' \
+            "$truth" "$bw" "$bwmiss" "$(cat bench/out/bwameth-screen.seconds.txt)" \
+            "$ambig" "$ambigmiss" "$(cat bench/out/abismal-ambig.seconds.txt)" \
+            "$m15" "$m15miss" "$(cat bench/out/abismal-m15.seconds.txt)" \
+            "$m20" "$m20miss" "$(cat bench/out/abismal-m20.seconds.txt)" \
+            "$m25" "$m25miss" "$(cat bench/out/abismal-m25.seconds.txt)" \
+            "$m30" "$m30miss" "$(cat bench/out/abismal-m30.seconds.txt)" \
+            "$(cat bench/out/truth.seconds.txt)" | tee bench/out/summary.txt
+
+          test "$bwmiss" -eq 0
+          # Production uses Abismal -a -m 0.20 on the total +/-2 kb screen.
+          test "$m20miss" -eq 0
+
+      - name: Upload benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounty1-wgbs-abismal-truth-benchmark
+          path: |
+            bench/out/summary.txt
+            bench/out/*.seconds.txt
+            bench/out/*missed*.txt
+            bench/out/*.stderr.log
+            bench/out/abismal-*.stats.yaml
+          if-no-files-found: warn
+          retention-days: 14

@@ -1,0 +1,124 @@
+name: Bounty 1 streaming WGBS smoke
+
+on:
+  pull_request:
+    types: [reopened, synchronize]
+    paths:
+      - '.github/workflows/bounty1-streaming-wgbs-smoke.yml'
+      - 'bounty1/**'
+  workflow_dispatch:
+
+concurrency:
+  group: bounty1-streaming-wgbs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  streaming-wgbs-chr22:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Load pinned analysis image from shared cache
+        uses: docker/build-push-action@v6
+        with:
+          context: bounty1
+          load: true
+          pull: true
+          tags: bounty1-pace:stream-smoke
+          cache-from: type=gha,scope=bounty1-docker
+          cache-to: type=gha,mode=max,scope=bounty1-docker
+
+      - name: Prepare real WT-rep1 WGBS prefix and chr22 reference
+        run: |
+          set -euo pipefail
+          mkdir -p stream-smoke/raw stream-smoke/ref stream-smoke/out stream-smoke/qc
+          curl -fsSL --retry 3 -o stream-smoke/ref/chr22.fa.gz \
+            https://hgdownload.soe.ucsc.edu/goldenPath/hg19/chromosomes/chr22.fa.gz
+          gzip -d stream-smoke/ref/chr22.fa.gz
+          python bounty1/bin/extract_remote_fastq_prefix.py \
+            --url1 https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202754/HRR1202754_f1.fq.gz \
+            --url2 https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202754/HRR1202754_r2.fq.gz \
+            --out1 stream-smoke/raw/WT_rep1_WGBS.R1.fastq.gz \
+            --out2 stream-smoke/raw/WT_rep1_WGBS.R2.fastq.gz \
+            --reads 150000 \
+            --metadata stream-smoke/qc/source.json
+          md5sum stream-smoke/raw/WT_rep1_WGBS.R1.fastq.gz | awk '{print $1}' > stream-smoke/qc/r1.md5
+          md5sum stream-smoke/raw/WT_rep1_WGBS.R2.fastq.gz | awk '{print $1}' > stream-smoke/qc/r2.md5
+
+      - name: Build chr22 bwa-meth index and official PACE windows
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/stream-smoke:/smoke" bounty1-pace:stream-smoke bash -lc '
+            set -euo pipefail
+            samtools faidx /smoke/ref/chr22.fa
+            bwameth.py index /smoke/ref/chr22.fa
+            Rscript /work/bin/export_pace_regions.R --output /smoke/ref/pace.all.bed --flank 500
+            awk "\$1 == \"chr22\"" /smoke/ref/pace.all.bed > /smoke/ref/pace.chr22.bed
+            test -s /smoke/ref/pace.chr22.bed
+          '
+
+      - name: Stream real WGBS prefix through fastp and bwa-meth
+        run: |
+          set -euo pipefail
+          R1_MD5=$(cat stream-smoke/qc/r1.md5)
+          R2_MD5=$(cat stream-smoke/qc/r2.md5)
+          docker run --rm -v "$PWD/stream-smoke:/smoke" bounty1-pace:stream-smoke bash -lc "
+            set -euo pipefail
+            cd /smoke/out
+            bash /work/bin/stream_wgbs_bwameth.sh \
+              WT_rep1_WGBS \
+              /smoke/raw/WT_rep1_WGBS.R1.fastq.gz \
+              /smoke/raw/WT_rep1_WGBS.R2.fastq.gz \
+              '$R1_MD5' '$R2_MD5' \
+              /smoke/ref/chr22.fa /smoke/ref/pace.chr22.bed 30 4
+          "
+          test -s stream-smoke/out/WT_rep1_WGBS.mapq30.pace-targets.deduplicated.bam
+          test -s stream-smoke/out/WT_rep1_WGBS.mapq30.pace-targets.deduplicated.bam.bai
+
+      - name: Extract CpG methylation with MethylDackel
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/stream-smoke:/smoke" bounty1-pace:stream-smoke bash -lc '
+            set -euo pipefail
+            cd /smoke/out
+            micromamba run -n methyldackel MethylDackel extract \
+              -q 30 -p 5 --minDepth 1 -@ 2 \
+              /smoke/ref/chr22.fa \
+              WT_rep1_WGBS.mapq30.pace-targets.deduplicated.bam \
+              -o WT_rep1_WGBS.methyldackel
+            test -s WT_rep1_WGBS.methyldackel_CpG.bedGraph
+            python3 /work/bin/methyldackel_to_bismark.py \
+              --input WT_rep1_WGBS.methyldackel_CpG.bedGraph \
+              --output /smoke/qc/WT_rep1_WGBS.bismark.cov.gz
+            gzip -t /smoke/qc/WT_rep1_WGBS.bismark.cov.gz
+            test "$(gzip -cd /smoke/qc/WT_rep1_WGBS.bismark.cov.gz | wc -l)" -gt 0
+          '
+
+      - name: Record bounded-smoke evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          du -sh stream-smoke > stream-smoke/qc/disk-usage.txt || true
+          cat > stream-smoke/qc/README.txt <<'EOF'
+          BOUNDED STREAMING WGBS TECHNICAL SMOKE
+          =====================================
+          Source library: WT_rep1_WGBS / HRA003336 / HRR1202754.
+          Input scope: first 150,000 paired records only.
+          Reference scope: hg19 chromosome 22 only.
+          Pipeline: exact compressed-prefix MD5 -> interleaved stream -> fastp
+          stdout -> bwa-meth -> MAPQ >=30 -> official DunedinPACE probe windows
+          -> duplicate removal -> MethylDackel -> Bismark-like coverage.
+
+          This is technical evidence only and is never used as the final
+          biological result or correlation.
+          EOF
+
+      - name: Upload streaming smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounty1-streaming-wgbs-smoke
+          path: stream-smoke/qc
+          if-no-files-found: error
+          retention-days: 14

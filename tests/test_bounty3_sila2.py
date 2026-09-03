@@ -5,8 +5,7 @@ Run: pytest tests/test_bounty3_sila2.py -v
 import json
 import pathlib
 import subprocess
-import time
-import statistics
+
 import pytest
 
 MANIFEST = pathlib.Path("results/sila2_manifest.json")
@@ -34,7 +33,9 @@ def test_sila2_schema_validation(manifest):
     assert feature_xml, "sila2_feature_descriptor_path not set"
     result = subprocess.run(
         ["xmllint", "--noout", "--schema", "schemas/sila2_core_v1.0.0.xsd", feature_xml],
-        capture_output=True, text=True
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert result.returncode == 0, (
         f"SiLA2 feature descriptor failed schema validation:\n{result.stderr}"
@@ -102,13 +103,16 @@ def test_ich_q14_audit_trail(manifest):
 def test_docker_compose_start():
     result = subprocess.run(
         ["docker", "compose", "up", "--wait", "--timeout", "120"],
-        capture_output=True, text=True, timeout=150
+        capture_output=True,
+        text=True,
+        timeout=150,
+        check=False,
     )
     assert result.returncode == 0, (
         f"docker compose up --wait failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
     )
     # Cleanup
-    subprocess.run(["docker", "compose", "down"], capture_output=True)
+    subprocess.run(["docker", "compose", "down"], capture_output=True, check=False)
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +122,9 @@ def test_e2e_mock_integration(manifest):
     e2e_cmd = manifest.get("e2e_test_command")
     if not e2e_cmd:
         pytest.skip("e2e_test_command not specified in manifest")
-    result = subprocess.run(e2e_cmd, capture_output=True, text=True, timeout=300)
+    result = subprocess.run(
+        e2e_cmd, capture_output=True, text=True, timeout=300, check=False
+    )
     assert result.returncode == 0, (
         f"E2E integration test failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
     )

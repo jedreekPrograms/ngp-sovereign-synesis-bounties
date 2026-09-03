@@ -1,0 +1,218 @@
+name: Bounty 1 WT rep2 H3K56ac sharded recovery
+
+on:
+  push:
+    branches: [bounty-1-real-pipeline]
+    paths:
+      - '.github/workflows/bounty1-chromatin-wt-rep2-h3k56ac-recovery.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: bounty1-chromatin-wt-rep2-h3k56ac-recovery
+  cancel-in-progress: false
+
+env:
+  SAMPLE: WT_rep2_H3K56ac
+  R1: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202633/HRR1202633_f1.fq.gz
+  R2: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202633/HRR1202633_r2.fq.gz
+  MD5_R1: e52e997836644d79b556aaaf7227ddfd
+  MD5_R2: 7592bf31afc9f9b17df9f227c4388885
+  INDEX_URL: https://genome-idx.s3.amazonaws.com/bt/hg19.zip
+  INDEX_MD5_URL: https://genome-idx.s3.amazonaws.com/bt/hg19.md5
+  INPUT_RUN_ID: '33148538119'
+
+jobs:
+  align_shard:
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        shard: [0, 1]
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Load pinned analysis image
+        uses: docker/build-push-action@v6
+        with:
+          context: bounty1
+          load: true
+          pull: true
+          tags: bounty1-pace:chromatin-wt-rep2-recovery
+          cache-from: type=gha,scope=bounty1-docker
+
+      - name: Prepare checksum-verified hg19 Bowtie2 index
+        run: |
+          set -euo pipefail
+          mkdir -p recovery/{ref,source,work,qc,out}
+          cd recovery/ref
+          curl -fL --retry 20 --retry-delay 5 --retry-all-errors -o hg19.zip "$INDEX_URL"
+          curl -fL --retry 20 --retry-delay 5 --retry-all-errors -o hg19.md5 "$INDEX_MD5_URL"
+          expected_zip=$(awk '$2 ~ /(^|\/)hg19\.zip$/ {print $1; exit}' hg19.md5)
+          test "${#expected_zip}" -eq 32
+          actual_zip=$(md5sum hg19.zip | awk '{print $1}')
+          test "${actual_zip,,}" = "${expected_zip,,}"
+          unzip -q hg19.zip
+          for file in hg19.1.bt2 hg19.2.bt2 hg19.3.bt2 hg19.4.bt2 hg19.rev.1.bt2 hg19.rev.2.bt2; do
+            test -s "$file"
+            expected=$(awk -v f="$file" '$2 ~ ("(^|/)" f "$") {print $1; exit}' hg19.md5)
+            test "${#expected}" -eq 32
+            actual=$(md5sum "$file" | awk '{print $1}')
+            test "${actual,,}" = "${expected,,}"
+          done
+          sha256sum hg19*.bt2 > ../qc/hg19-index.SHA256SUMS
+
+      - name: Align pair-disjoint treatment shard and create fixmate checkpoint
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -e SAMPLE -e R1 -e R2 -e MD5_R1 -e MD5_R2 -e SHARD \
+            -v "$PWD/recovery:/recovery" \
+            bounty1-pace:chromatin-wt-rep2-recovery bash -lc '
+              set -euo pipefail
+              cd /recovery/work
+              download_verified() {
+                local url="$1" expected="$2" dest="$3" label="$4"
+                local attempt actual
+                for attempt in 1 2 3 4; do
+                  touch "$dest"
+                  if curl -fL --retry 20 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
+                       --speed-time 120 --speed-limit 1024 -C - -o "$dest" "$url" \
+                       >> "/recovery/qc/${label}.curl.stdout.log" 2>> "/recovery/qc/${label}.curl.stderr.log"; then
+                    actual=$(md5sum "$dest" | awk '"'"'{print $1}'"'"')
+                    if [[ "${actual,,}" == "${expected,,}" ]] && gzip -t "$dest"; then
+                      echo "${actual}  ${dest}" > "/recovery/qc/${label}.source-md5.txt"
+                      return 0
+                    fi
+                  fi
+                  rm -f "$dest"
+                  sleep $((attempt * 10))
+                done
+                return 1
+              }
+              r1=/recovery/source/${SAMPLE}.R1.fastq.gz
+              r2=/recovery/source/${SAMPLE}.R2.fastq.gz
+              download_verified "$R1" "$MD5_R1" "$r1" "${SAMPLE}.shard${SHARD}.R1"
+              download_verified "$R2" "$MD5_R2" "$r2" "${SAMPLE}.shard${SHARD}.R2"
+              python3 /work/bin/stream_interleaved_fastq.py --r1-source "$r1" --r2-source "$r2" \
+                --r1-md5 "$MD5_R1" --r2-md5 "$MD5_R2" | \
+              awk -v shard="$SHARD" '"'"'{ if (int((NR-1)/8)%2 == shard) print } END { if (NR%8 != 0) exit 42; print "source_pairs=" NR/8 " shard=" shard > "/dev/stderr" }'"'"' \
+                2> "/recovery/qc/${SAMPLE}.shard${SHARD}.split.log" | \
+              fastp --stdin --interleaved_in --stdout --thread 4 \
+                --json "/recovery/qc/${SAMPLE}.shard${SHARD}.fastp.json" \
+                --html "/recovery/qc/${SAMPLE}.shard${SHARD}.fastp.html" \
+                2> "/recovery/qc/${SAMPLE}.shard${SHARD}.fastp.stderr.log" | \
+              bowtie2 --very-sensitive -x /recovery/ref/hg19 --interleaved - -p 4 \
+                2> "/recovery/qc/${SAMPLE}.shard${SHARD}.bowtie2.log" | \
+              samtools view -b - | samtools sort -n -@ 4 -m 2G -l 1 -o ${SAMPLE}.shard${SHARD}.name.bam
+              rm -f "$r1" "$r2"
+              samtools quickcheck -v ${SAMPLE}.shard${SHARD}.name.bam
+              samtools fixmate -m ${SAMPLE}.shard${SHARD}.name.bam ${SAMPLE}.shard${SHARD}.fixmate.bam
+              rm -f ${SAMPLE}.shard${SHARD}.name.bam
+              samtools sort -@ 4 -m 2G -l 1 -o /recovery/out/${SAMPLE}.shard${SHARD}.position.bam ${SAMPLE}.shard${SHARD}.fixmate.bam
+              rm -f ${SAMPLE}.shard${SHARD}.fixmate.bam
+              samtools quickcheck -v /recovery/out/${SAMPLE}.shard${SHARD}.position.bam
+              sha256sum /recovery/out/${SAMPLE}.shard${SHARD}.position.bam > /recovery/qc/${SAMPLE}.shard${SHARD}.checkpoint.SHA256SUMS
+            '
+
+      - name: Upload durable alignment shard checkpoint
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounty1-chromatin-WT_rep2_H3K56ac-align-shard-${{ matrix.shard }}
+          path: |
+            recovery/out/WT_rep2_H3K56ac.shard${{ matrix.shard }}.position.bam
+            recovery/qc
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  reduce:
+    needs: align_shard
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Load pinned analysis image
+        uses: docker/build-push-action@v6
+        with:
+          context: bounty1
+          load: true
+          pull: true
+          tags: bounty1-pace:chromatin-wt-rep2-recovery
+          cache-from: type=gha,scope=bounty1-docker
+
+      - name: Download treatment shard checkpoints
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bounty1-chromatin-WT_rep2_H3K56ac-align-shard-*
+          path: recovery/shards
+
+      - name: Download existing matched WT INPUT checkpoint only once
+        uses: actions/download-artifact@v4
+        with:
+          name: bounty1-chromatin-WT-input-checkpoint
+          path: recovery/input-checkpoint
+          github-token: ${{ github.token }}
+          run-id: 33148538119
+
+      - name: Merge shards, remove duplicates globally, MAPQ30, MACS3 and fragments
+        run: |
+          set -euo pipefail
+          mkdir -p recovery/{work,input,results,qc}
+          find recovery/shards -name '*.position.bam' -type f -print | sort > recovery/work/shards.txt
+          test "$(wc -l < recovery/work/shards.txt)" -eq 2
+          cp recovery/input-checkpoint/input/*.bam recovery/input/
+          cp recovery/input-checkpoint/input/*.bai recovery/input/
+          input_bam=$(find recovery/input -name '*.mapq30.bam' -print -quit)
+          test -n "$input_bam"
+          samtools quickcheck -v "$input_bam"
+          mapfile -t shard_bams < recovery/work/shards.txt
+          samtools merge -@ 4 -f recovery/work/${SAMPLE}.position.bam "${shard_bams[@]}"
+          samtools quickcheck -v recovery/work/${SAMPLE}.position.bam
+          samtools markdup -r -@ 4 recovery/work/${SAMPLE}.position.bam recovery/work/${SAMPLE}.dedup.bam
+          rm -f recovery/work/${SAMPLE}.position.bam
+          samtools view -b -q 30 recovery/work/${SAMPLE}.dedup.bam | samtools sort -@ 4 -m 2G -o recovery/work/${SAMPLE}.mapq30.bam
+          rm -f recovery/work/${SAMPLE}.dedup.bam
+          samtools index recovery/work/${SAMPLE}.mapq30.bam
+          samtools quickcheck -v recovery/work/${SAMPLE}.mapq30.bam "$input_bam"
+          samtools flagstat recovery/work/${SAMPLE}.mapq30.bam > recovery/qc/${SAMPLE}.flagstat.txt
+          test "$(samtools view -c recovery/work/${SAMPLE}.mapq30.bam)" -gt 0
+          docker run --rm \
+            -v "$PWD/recovery:/recovery" \
+            bounty1-pace:chromatin-wt-rep2-recovery bash -lc '
+              set -euo pipefail
+              input_bam=$(find /recovery/input -name "*.mapq30.bam" -print -quit)
+              cd /recovery/work
+              macs3 callpeak -t WT_rep2_H3K56ac.mapq30.bam -c "$input_bam" -f BAMPE -g hs \
+                -n WT_rep2_H3K56ac_hg19_full -q 0.01 --keep-dup all -B \
+                > /recovery/qc/WT_rep2_H3K56ac.macs3.stdout.log 2> /recovery/qc/WT_rep2_H3K56ac.macs3.stderr.log
+              test -s WT_rep2_H3K56ac_hg19_full_peaks.narrowPeak
+              cp WT_rep2_H3K56ac_hg19_full_peaks.narrowPeak /recovery/results/
+              wc -l WT_rep2_H3K56ac_hg19_full_peaks.narrowPeak > /recovery/results/WT_rep2_H3K56ac.peak-count.txt
+              samtools view -f 67 -F 2304 -q 30 WT_rep2_H3K56ac.mapq30.bam | \
+                awk '"'"'BEGIN{OFS="\t"} $9 != 0 {p=$4-1;m=$8-1;s=(p<m?p:m);l=($9<0?-$9:$9);e=s+l;if(e>s)print $3,s,e}'"'"' | \
+                gzip -1 > /recovery/results/WT_rep2_H3K56ac.fragments.bed.gz
+              gzip -t /recovery/results/WT_rep2_H3K56ac.fragments.bed.gz
+            '
+          cp recovery/work/${SAMPLE}.mapq30.bam recovery/results/
+          cp recovery/work/${SAMPLE}.mapq30.bam.bai recovery/results/
+          sha256sum recovery/results/* > recovery/qc/results.SHA256SUMS
+          sha256sum "${shard_bams[@]}" > recovery/qc/alignment-shards.SHA256SUMS
+
+      - name: Upload final WT rep2 H3K56ac evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounty1-chromatin-WT-WT_rep2_H3K56ac
+          path: |
+            recovery/results
+            recovery/qc
+          if-no-files-found: error
+          compression-level: 1
+          retention-days: 30

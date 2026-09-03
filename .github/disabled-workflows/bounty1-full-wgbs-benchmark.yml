@@ -1,0 +1,218 @@
+name: Bounty 1 full-source WGBS benchmark
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: bounty1-full-wgbs-benchmark
+  cancel-in-progress: false
+
+jobs:
+  sirt7-rep1-full-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Load pinned analysis image from shared cache
+        uses: docker/build-push-action@v6
+        with:
+          context: bounty1
+          load: true
+          pull: true
+          tags: bounty1-pace:full-benchmark
+          cache-from: type=gha,scope=bounty1-docker
+          cache-to: type=gha,mode=max,scope=bounty1-docker
+
+      - name: Prepare full hg19 and verified WGBS FASTQs in parallel
+        run: |
+          set -euo pipefail
+          mkdir -p full-benchmark/ref full-benchmark/raw full-benchmark/out full-benchmark/qc
+
+          prepare_reference() {
+            local start end
+            start=$(date +%s)
+            curl -fsSL --retry 5 --retry-delay 5 \
+              -o full-benchmark/ref/hg19.fa.gz \
+              https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz
+            curl -fsSL --retry 5 --retry-delay 5 \
+              -o full-benchmark/ref/md5sum.txt \
+              https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/md5sum.txt
+            (
+              cd full-benchmark/ref
+              grep -E '[[:space:]]hg19.fa.gz$' md5sum.txt > hg19.fa.gz.md5
+              md5sum --check hg19.fa.gz.md5
+              gzip -d hg19.fa.gz
+            )
+            docker run --rm -v "$PWD/full-benchmark:/bench" bounty1-pace:full-benchmark bash -lc '
+              set -euo pipefail
+              samtools faidx /bench/ref/hg19.fa
+              bwameth.py index /bench/ref/hg19.fa
+              Rscript /work/bin/export_pace_regions.R --output /bench/ref/pace.bed --flank 500
+              test -s /bench/ref/pace.bed
+            '
+            end=$(date +%s)
+            echo $((end-start)) > full-benchmark/qc/reference-wall-seconds.txt
+            du -sh full-benchmark/ref > full-benchmark/qc/reference-size.txt
+          }
+
+          download_inputs() {
+            local start end r1_pid r2_pid r1_status r2_status
+            start=$(date +%s)
+            curl --fail --location --show-error --silent \
+              --retry 20 --retry-delay 10 --retry-all-errors --connect-timeout 30 \
+              --continue-at - \
+              --output full-benchmark/raw/SIRT7_rep1_WGBS.R1.fastq.gz \
+              https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202752/HRR1202752_f1.fq.gz &
+            r1_pid=$!
+            curl --fail --location --show-error --silent \
+              --retry 20 --retry-delay 10 --retry-all-errors --connect-timeout 30 \
+              --continue-at - \
+              --output full-benchmark/raw/SIRT7_rep1_WGBS.R2.fastq.gz \
+              https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202752/HRR1202752_r2.fq.gz &
+            r2_pid=$!
+            set +e
+            wait "$r1_pid"; r1_status=$?
+            wait "$r2_pid"; r2_status=$?
+            set -e
+            printf 'R1 curl exit=%s\nR2 curl exit=%s\n' "$r1_status" "$r2_status" > full-benchmark/qc/download-status.txt
+            if (( r1_status != 0 || r2_status != 0 )); then
+              return 1
+            fi
+            echo 'dc90b7cf4bc3ebc58be437a62851a41f  full-benchmark/raw/SIRT7_rep1_WGBS.R1.fastq.gz' | md5sum --check
+            echo 'f313f02508a30ed0aea3e99ee4d0cc4a  full-benchmark/raw/SIRT7_rep1_WGBS.R2.fastq.gz' | md5sum --check
+            gzip -t full-benchmark/raw/SIRT7_rep1_WGBS.R1.fastq.gz
+            gzip -t full-benchmark/raw/SIRT7_rep1_WGBS.R2.fastq.gz
+            end=$(date +%s)
+            echo $((end-start)) > full-benchmark/qc/download-wall-seconds.txt
+            du -sh full-benchmark/raw > full-benchmark/qc/raw-size.txt
+          }
+
+          PREP_START=$(date +%s)
+          prepare_reference > full-benchmark/qc/reference-prep.log 2>&1 &
+          REF_PID=$!
+          download_inputs > full-benchmark/qc/download.log 2>&1 &
+          DL_PID=$!
+
+          set +e
+          wait "$REF_PID"; REF_STATUS=$?
+          wait "$DL_PID"; DL_STATUS=$?
+          set -e
+          printf 'reference exit=%s\ndownload exit=%s\n' "$REF_STATUS" "$DL_STATUS" > full-benchmark/qc/parallel-prep-status.txt
+          if (( REF_STATUS != 0 || DL_STATUS != 0 )); then
+            echo 'Parallel preparation failed; see reference-prep.log and download.log' >&2
+            exit 1
+          fi
+          PREP_END=$(date +%s)
+          echo $((PREP_END-PREP_START)) > full-benchmark/qc/parallel-prep-wall-seconds.txt
+          df -h > full-benchmark/qc/disk-after-prep.txt
+
+      - name: Process complete SIRT7 rep1 WGBS source through production path
+        run: |
+          set -euo pipefail
+          (
+            while true; do
+              printf '\n=== %s ===\n' "$(date --iso-8601=seconds)"
+              free -m
+              ps -eo pid,ppid,rss,vsz,pcpu,pmem,comm,args --sort=-rss | head -20
+              sleep 30
+            done
+          ) > full-benchmark/qc/memory-monitor.txt 2>&1 &
+          MONITOR_PID=$!
+          cleanup_monitor() { kill "$MONITOR_PID" 2>/dev/null || true; }
+          trap cleanup_monitor EXIT
+
+          START=$(date +%s)
+          docker run --rm \
+            -e WGBS_SORT_MEM=256M \
+            -v "$PWD/full-benchmark:/bench" \
+            bounty1-pace:full-benchmark bash -lc '
+              set -euo pipefail
+              cd /bench/out
+              bash /work/bin/stream_wgbs_bwameth.sh \
+                SIRT7_rep1_WGBS \
+                /bench/raw/SIRT7_rep1_WGBS.R1.fastq.gz \
+                /bench/raw/SIRT7_rep1_WGBS.R2.fastq.gz \
+                dc90b7cf4bc3ebc58be437a62851a41f \
+                f313f02508a30ed0aea3e99ee4d0cc4a \
+                /bench/ref/hg19.fa /bench/ref/pace.bed 30 4
+            '
+          END=$(date +%s)
+          echo $((END-START)) > full-benchmark/qc/alignment-wall-seconds.txt
+          test -s full-benchmark/out/SIRT7_rep1_WGBS.mapq30.pace-targets.deduplicated.bam
+          test -s full-benchmark/out/SIRT7_rep1_WGBS.mapq30.pace-targets.deduplicated.bam.bai
+          df -h > full-benchmark/qc/disk-after-alignment.txt
+          du -sh full-benchmark/out > full-benchmark/qc/output-size-after-alignment.txt
+
+          rm -f full-benchmark/raw/SIRT7_rep1_WGBS.R1.fastq.gz \
+                full-benchmark/raw/SIRT7_rep1_WGBS.R2.fastq.gz
+          cleanup_monitor
+          trap - EXIT
+
+      - name: Extract full-source PACE-region CpG methylation
+        run: |
+          set -euo pipefail
+          START=$(date +%s)
+          docker run --rm -v "$PWD/full-benchmark:/bench" bounty1-pace:full-benchmark bash -lc '
+            set -euo pipefail
+            cd /bench/out
+            micromamba run -n methyldackel MethylDackel extract \
+              -q 30 -p 5 --minDepth 1 -@ 2 \
+              /bench/ref/hg19.fa \
+              SIRT7_rep1_WGBS.mapq30.pace-targets.deduplicated.bam \
+              -o SIRT7_rep1_WGBS.methyldackel
+            test -s SIRT7_rep1_WGBS.methyldackel_CpG.bedGraph
+            python3 /work/bin/methyldackel_to_bismark.py \
+              --input SIRT7_rep1_WGBS.methyldackel_CpG.bedGraph \
+              --output /bench/qc/SIRT7_rep1_WGBS.bismark.cov.gz
+            gzip -t /bench/qc/SIRT7_rep1_WGBS.bismark.cov.gz
+            test "$(gzip -cd /bench/qc/SIRT7_rep1_WGBS.bismark.cov.gz | wc -l)" -gt 0
+          '
+          END=$(date +%s)
+          echo $((END-START)) > full-benchmark/qc/methylation-wall-seconds.txt
+          gzip -cd full-benchmark/qc/SIRT7_rep1_WGBS.bismark.cov.gz | wc -l > full-benchmark/qc/coverage-row-count.txt
+
+      - name: Record benchmark evidence and failure diagnostics
+        if: always()
+        run: |
+          set +e
+          mkdir -p full-benchmark/qc
+          cp full-benchmark/out/SIRT7_rep1_WGBS.source-stream.log full-benchmark/qc/ 2>/dev/null || true
+          cp full-benchmark/out/SIRT7_rep1_WGBS.fastp.stderr.log full-benchmark/qc/ 2>/dev/null || true
+          cp full-benchmark/out/SIRT7_rep1_WGBS.bwameth.stderr.log full-benchmark/qc/ 2>/dev/null || true
+          cp full-benchmark/out/SIRT7_rep1_WGBS.samtools-view.stderr.log full-benchmark/qc/ 2>/dev/null || true
+          cp full-benchmark/out/SIRT7_rep1_WGBS.pipeline-status.txt full-benchmark/qc/ 2>/dev/null || true
+          cp full-benchmark/out/SIRT7_rep1_WGBS.fastp.json full-benchmark/qc/ 2>/dev/null || true
+          cp full-benchmark/out/SIRT7_rep1_WGBS.pace-targets.flagstat.txt full-benchmark/qc/ 2>/dev/null || true
+          df -h > full-benchmark/qc/final-disk.txt
+          du -sh full-benchmark 2>/dev/null > full-benchmark/qc/final-working-set.txt
+          cat > full-benchmark/qc/README.txt <<'EOF'
+          FULL-SOURCE WGBS BENCHMARK
+          ==========================
+          Source: HRA003336 / HRR1202752 / SIRT7_rep1_WGBS, both complete FASTQ mates.
+          Input size: ~38.1 GiB compressed (smallest complete WGBS library in this cohort).
+          Source integrity: complete archives are staged and checked against their published
+          MD5 values before alignment.
+          Reference: complete UCSC hg19 FASTA, checksum-validated against UCSC md5sum.txt.
+          Preparation optimization: reference indexing and FASTQ acquisition run concurrently;
+          the two mate downloads also run concurrently. This changes scheduling only, not data,
+          filtering, alignment, methylation calling, or acceptance thresholds.
+          Processing: verified FASTQ -> fastp stream -> bwa-meth -> MAPQ >=30 -> official
+          DunedinPACE probe windows -> low-memory target sort -> duplicate removal ->
+          MethylDackel -> Bismark-like coverage.
+
+          Only one biological sample is staged at a time; the full ~1 TiB cohort is never
+          stored on the runner. Diagnostic stderr, PIPESTATUS and RAM snapshots are kept
+          when the workflow reaches its evidence step.
+          EOF
+
+      - name: Upload benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounty1-full-wgbs-benchmark
+          path: full-benchmark/qc
+          if-no-files-found: warn
+          retention-days: 14

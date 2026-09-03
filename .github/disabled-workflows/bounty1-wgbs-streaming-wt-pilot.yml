@@ -1,0 +1,171 @@
+name: Bounty 1 WGBS segmented WT pilot
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/bounty1-wgbs-streaming-wt-pilot.yml'
+      - 'bounty1/bin/stream_interleaved_fastq.py'
+      - 'bounty1/bin/screen_wgbs_pace_candidates.sh'
+      - 'bounty1/bin/chunked_abismal_screen.py'
+
+permissions:
+  contents: read
+  actions: read
+
+# 50M source-pair shards are validated durable checkpoints. Completed durable
+# ranges now include WT_rep1 0-250M, WT_rep2 0-250M, and SIRT1 rep1/rep2 0-200M.
+# Independent full-hg19 truth/context benchmarks (runs 33220888867/33220888878)
+# validated the production +/-2 kb Abismal `-a -m 0.20` screen with 0/603 truth
+# misses on 100k authentic WT pairs. Resume only the three non-overlapping ranges
+# below at max-parallel=3; every shard verifies both complete published source MD5s.
+# Do not cancel an expensive active shard when a later branch update arrives.
+concurrency:
+  group: bounty1-wgbs-v3-wt-pilot-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  candidate_shard:
+    if: github.head_ref == 'bounty-1-real-pipeline'
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - sample_id: WT_rep2_WGBS
+            run_accession: HRR1202755
+            r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202755/HRR1202755_f1.fq.gz
+            r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202755/HRR1202755_r2.fq.gz
+            md5_r1: dcd665da6062db707fd67baa5d110e7d
+            md5_r2: c67204ec1ceac450fbc6c80229e0c939
+            pair_start: '250000000'
+            pair_count: '50000000'
+            part: part6
+          - sample_id: SIRT1_rep1_WGBS
+            run_accession: HRR1202740
+            r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202740/HRR1202740_f1.fq.gz
+            r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202740/HRR1202740_r2.fq.gz
+            md5_r1: 3fbf8ee10f5176524a246b707bd5ad7e
+            md5_r2: f0370fe0d201ae32b47150977e1bdc1f
+            pair_start: '200000000'
+            pair_count: '50000000'
+            part: part5
+          - sample_id: SIRT1_rep2_WGBS
+            run_accession: HRR1202741
+            r1_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202741/HRR1202741_f1.fq.gz
+            r2_url: https://download.cncb.ac.cn/gsa-human/HRA003336/HRR1202741/HRR1202741_r2.fq.gz
+            md5_r1: f851bf7a62a22e55e4fe798960a424fb
+            md5_r2: f1949646f0fa4f56e3a4f14a2061d1fe
+            pair_start: '200000000'
+            pair_count: '50000000'
+            part: part5
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      SAMPLE_ID: ${{ matrix.sample_id }}
+      RUN_ACCESSION: ${{ matrix.run_accession }}
+      R1_URL: ${{ matrix.r1_url }}
+      R2_URL: ${{ matrix.r2_url }}
+      MD5_R1: ${{ matrix.md5_r1 }}
+      MD5_R2: ${{ matrix.md5_r2 }}
+      WGBS_PAIR_START: ${{ matrix.pair_start }}
+      WGBS_PAIR_COUNT: ${{ matrix.pair_count }}
+      PART: ${{ matrix.part }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Load pinned analysis image from shared cache
+        uses: docker/build-push-action@v6
+        with:
+          context: bounty1
+          load: true
+          pull: true
+          tags: bounty1-pace:wgbs-segmented-pilot
+          cache-from: type=gha,scope=bounty1-docker
+          cache-to: type=gha,mode=max,scope=bounty1-docker
+
+      - name: Prepare checksum-verified hg19 and PACE references
+        run: |
+          set -euo pipefail
+          mkdir -p shard/ref shard/out shard/qc
+          curl -fsSL --retry 10 --retry-delay 5 --retry-all-errors \
+            -o shard/ref/hg19.fa.gz \
+            https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz
+          curl -fsSL --retry 10 --retry-delay 5 --retry-all-errors \
+            -o shard/ref/md5sum.txt \
+            https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/md5sum.txt
+          (
+            cd shard/ref
+            grep -E '[[:space:]]hg19.fa.gz$' md5sum.txt > hg19.fa.gz.md5
+            md5sum --check hg19.fa.gz.md5
+            gzip -d hg19.fa.gz
+          )
+          docker run --rm -v "$PWD/shard:/shard" bounty1-pace:wgbs-segmented-pilot bash -lc '
+            set -euo pipefail
+            samtools faidx /shard/ref/hg19.fa
+            Rscript /work/bin/export_pace_regions.R --output /shard/ref/pace.bed --flank 500
+            samtools faidx /shard/ref/hg19.fa chr1:100000-101000 > /shard/ref/pace-screen.fa
+            test -s /shard/ref/pace-screen.fa
+          '
+
+      - name: Screen non-overlapping source-pair shard with full-source MD5 verification
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -e SAMPLE_ID -e R1_URL -e R2_URL -e MD5_R1 -e MD5_R2 \
+            -e WGBS_PAIR_START -e WGBS_PAIR_COUNT \
+            -v "$PWD/shard:/shard" bounty1-pace:wgbs-segmented-pilot bash -lc '
+              set -euo pipefail
+              cd /shard/out
+              bash /work/bin/screen_wgbs_pace_candidates.sh \
+                "$SAMPLE_ID" "$R1_URL" "$R2_URL" \
+                "$MD5_R1" "$MD5_R2" /shard/ref/pace-screen.fa 4
+            '
+          test -s "shard/out/${SAMPLE_ID}.candidate.R1.fastq.gz"
+          test -s "shard/out/${SAMPLE_ID}.candidate.R2.fastq.gz"
+          gzip -t "shard/out/${SAMPLE_ID}.candidate.R1.fastq.gz"
+          gzip -t "shard/out/${SAMPLE_ID}.candidate.R2.fastq.gz"
+          grep -q '^stream_interleaved_fastq=0$' "shard/out/${SAMPLE_ID}.pace-screen.pipeline-status.txt"
+          grep -q '^pair_range_filter=0$' "shard/out/${SAMPLE_ID}.pace-screen.pipeline-status.txt"
+          grep -q '^fastp=0$' "shard/out/${SAMPLE_ID}.pace-screen.pipeline-status.txt"
+          grep -q '^chunked_abismal_screen=0$' "shard/out/${SAMPLE_ID}.pace-screen.pipeline-status.txt"
+
+      - name: Build durable candidate checkpoint
+        run: |
+          set -euo pipefail
+          checkpoint="checkpoint-candidate-${PART}"
+          mkdir -p "$checkpoint"
+          cp "shard/out/${SAMPLE_ID}.candidate.R1.fastq.gz" "$checkpoint/"
+          cp "shard/out/${SAMPLE_ID}.candidate.R2.fastq.gz" "$checkpoint/"
+          cp "shard/out/${SAMPLE_ID}.candidate-pair-count.txt" "$checkpoint/"
+          cp "shard/out/${SAMPLE_ID}.pace-screen.pipeline-status.txt" "$checkpoint/"
+          cp "shard/out/${SAMPLE_ID}.pace-screen.range.stderr.log" "$checkpoint/"
+          (cd "$checkpoint" && sha256sum "${SAMPLE_ID}.candidate.R1.fastq.gz" "${SAMPLE_ID}.candidate.R2.fastq.gz" > SHA256SUMS)
+          cat > "$checkpoint/checkpoint.json" <<EOF
+          {"sample_id":"${SAMPLE_ID}","stage":"candidate-${PART}","source_pair_start":${WGBS_PAIR_START},"source_pair_count":${WGBS_PAIR_COUNT},"source_r1_md5":"${MD5_R1}","source_r2_md5":"${MD5_R2}","run_accession":"${RUN_ACCESSION}","screen":"Abismal 3.3.0 PACE +/-2 kb -a -m 0.20; 4M bounded chunks","git_sha":"${GITHUB_SHA}"}
+          EOF
+
+      - name: Upload durable candidate checkpoint
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounty1-wgbs-v3-${{ env.SAMPLE_ID }}-candidate-${{ env.PART }}
+          path: checkpoint-candidate-${{ env.PART }}
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 30
+
+      - name: Upload compact diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounty1-wgbs-segmented-${{ env.SAMPLE_ID }}-${{ env.PART }}-diagnostics
+          path: |
+            shard/qc
+            shard/out/*.log
+            shard/out/*.txt
+            shard/out/*.json
+          if-no-files-found: warn
+          retention-days: 14

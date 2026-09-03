@@ -1,0 +1,246 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Fast, conservative WGBS candidate screen for DunedinPACE loci.
+#
+# IMPORTANT: this is only a candidate prefilter. Final candidate alignment,
+# MAPQ>=30 filtering, target restriction, duplicate removal and methylation
+# calling still use checksum-verified complete hg19.
+#
+# Validation evidence (GitHub Actions run 32740878122): on 100k authentic
+# WT_rep1 pairs, Abismal 3.3.0 against PACE +/-2 kb with `-a -m 0.20` retained
+# every one of 603 full-hg19 MAPQ30 PACE truth pairs (0 missed), while taking
+# ~12 s and retaining 22,545 candidate pairs. Wider 5/10 kb variants also had
+# zero misses; +/-2 kb is therefore the smallest validated context.
+#
+# The optional WGBS_PAIR_START / WGBS_PAIR_COUNT environment variables select
+# a contiguous pair range *after* the source stream. The streamer still reads
+# both complete compressed objects and verifies their published MD5 values, so
+# each resumable segment stays fail-closed. Pair ranges are non-overlapping and
+# may later be concatenated as gzip members before the final full-hg19 stage.
+#
+# If a requested range begins at or beyond a checksum-verified source EOF, the
+# script emits an explicit zero-pair EOF checkpoint and succeeds. This is not a
+# relaxed error path: it is accepted only when the full source stream completed
+# successfully, both source MD5 checks passed, and the measured total pair count
+# proves start >= EOF.
+#
+# Usage:
+#   screen_wgbs_pace_candidates.sh SAMPLE R1 R2 R1_MD5 R2_MD5 \
+#       SCREEN_REFERENCE_FASTA THREADS
+
+if [[ $# -ne 7 ]]; then
+  echo "usage: $0 SAMPLE R1 R2 R1_MD5 R2_MD5 SCREEN_REF_FASTA THREADS" >&2
+  exit 2
+fi
+
+sample_id="$1"
+r1_source="$2"
+r2_source="$3"
+r1_md5="${4,,}"
+r2_md5="${5,,}"
+screen_reference="$6"
+threads="$7"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+pair_start="${WGBS_PAIR_START:-0}"
+pair_count="${WGBS_PAIR_COUNT:-0}"
+
+if [[ -z "$r2_source" ]]; then
+  echo "PACE candidate screen requires paired-end WGBS" >&2
+  exit 2
+fi
+if [[ ! -s "$screen_reference" ]]; then
+  echo "screen reference FASTA not found or empty: $screen_reference" >&2
+  exit 2
+fi
+if ! [[ "$threads" =~ ^[0-9]+$ ]] || (( threads < 1 )); then
+  echo "THREADS must be a positive integer" >&2
+  exit 2
+fi
+if ! [[ "$pair_start" =~ ^[0-9]+$ && "$pair_count" =~ ^[0-9]+$ ]]; then
+  echo "WGBS_PAIR_START and WGBS_PAIR_COUNT must be non-negative integers" >&2
+  exit 2
+fi
+
+fastp_threads="$threads"
+if (( fastp_threads > 2 )); then
+  fastp_threads=2
+fi
+
+ref_root=""
+if [[ -s /shard/ref/hg19.fa && -s /shard/ref/pace.bed ]]; then
+  ref_root="/shard/ref"
+elif [[ -s /local/ref/hg19.fa && -s /local/ref/pace.bed ]]; then
+  ref_root="/local/ref"
+fi
+
+if [[ -n "$ref_root" ]]; then
+  ctx_bed="/tmp/${sample_id}.pace-screen-2k.merged.bed"
+  ctx_fasta="/tmp/${sample_id}.pace-screen-2k.fa"
+  python3 - "${ref_root}/pace.bed" "$ctx_bed" <<'PY'
+from collections import defaultdict
+from pathlib import Path
+import sys
+
+src = Path(sys.argv[1])
+dst = Path(sys.argv[2])
+extra = 1500
+by_chrom = defaultdict(list)
+for line in src.read_text(encoding="utf-8").splitlines():
+    if not line or line.startswith("#"):
+        continue
+    fields = line.split("\t")
+    chrom = fields[0]
+    start = max(0, int(fields[1]) - extra)
+    end = int(fields[2]) + extra
+    by_chrom[chrom].append((start, end))
+
+with dst.open("w", encoding="utf-8") as out:
+    for chrom in sorted(by_chrom):
+        merged = []
+        for start, end in sorted(by_chrom[chrom]):
+            if not merged or start > merged[-1][1]:
+                merged.append([start, end])
+            else:
+                merged[-1][1] = max(merged[-1][1], end)
+        for start, end in merged:
+            out.write(f"{chrom}\t{start}\t{end}\n")
+PY
+  : > "$ctx_fasta"
+  while read -r chrom start end; do
+    samtools faidx "${ref_root}/hg19.fa" "${chrom}:$((start + 1))-${end}"
+  done < "$ctx_bed" >> "$ctx_fasta"
+  test -s "$ctx_fasta"
+  screen_reference="$ctx_fasta"
+fi
+
+screen_index="${screen_reference}.abismal.idx"
+if [[ ! -s "$screen_index" ]]; then
+  micromamba run -n abismal abismal idx -t "$threads" \
+    "$screen_reference" "$screen_index"
+fi
+test -s "$screen_index"
+
+candidate_r1="${sample_id}.candidate.R1.fastq.gz"
+candidate_r2="${sample_id}.candidate.R2.fastq.gz"
+status_file="${sample_id}.pace-screen.pipeline-status.txt"
+range_log="${sample_id}.pace-screen.range.stderr.log"
+source_log="${sample_id}.pace-screen.source-stream.log"
+workdir="$(mktemp -d "/tmp/${sample_id}.abismal-screen.XXXXXX")"
+cleanup() {
+  rm -rf "$workdir"
+}
+trap cleanup EXIT
+
+set +e
+python3 "${script_dir}/stream_interleaved_fastq.py" \
+  --r1-source "$r1_source" --r2-source "$r2_source" \
+  --r1-md5 "$r1_md5" --r2-md5 "$r2_md5" \
+  2> "$source_log" | \
+python3 -c '
+import sys
+start = int(sys.argv[1])
+count = int(sys.argv[2])
+stop = None if count == 0 else start + count
+src = sys.stdin.buffer
+out = sys.stdout.buffer
+idx = 0
+selected = 0
+while True:
+    lines = [src.readline() for _ in range(8)]
+    if lines[0] == b"":
+        break
+    if any(line == b"" for line in lines):
+        raise SystemExit("truncated interleaved pair while applying pair range")
+    if idx >= start and (stop is None or idx < stop):
+        out.writelines(lines)
+        selected += 1
+    idx += 1
+out.flush()
+print(f"pair-range total={idx} start={start} count={count} selected={selected}", file=sys.stderr)
+if selected == 0:
+    raise SystemExit("pair range selected zero records")
+' "$pair_start" "$pair_count" \
+  2> "$range_log" | \
+fastp \
+  --stdin --interleaved_in --stdout \
+  --json "${sample_id}.pace-screen.fastp.json" \
+  --html "${sample_id}.pace-screen.fastp.html" \
+  --thread "$fastp_threads" \
+  2> "${sample_id}.pace-screen.fastp.stderr.log" | \
+python3 "${script_dir}/chunked_abismal_screen.py" \
+  --index "$screen_index" \
+  --threads "$threads" \
+  --candidate-r1 "$candidate_r1" \
+  --candidate-r2 "$candidate_r2" \
+  --workdir "$workdir" \
+  --chunk-pairs 4000000 \
+  --max-edit-distance 0.20 \
+  2> "${sample_id}.pace-screen.abismal.stderr.log"
+feed_status=("${PIPESTATUS[@]}")
+set -e
+
+{
+  echo "stream_interleaved_fastq=${feed_status[0]}"
+  echo "pair_range_filter=${feed_status[1]}"
+  echo "fastp=${feed_status[2]}"
+  echo "chunked_abismal_screen=${feed_status[3]}"
+  echo "pair_start=${pair_start}"
+  echo "pair_count=${pair_count}"
+} > "$status_file"
+
+# A zero selected range is a clean EOF only after the complete source stream
+# passed its MD5 checks.  Parse the measured total from the range log and keep
+# the raw range-filter exit code for auditability while normalizing the public
+# checkpoint status to success.
+if (( feed_status[0] == 0 && feed_status[1] != 0 )); then
+  range_summary="$(grep -E '^pair-range total=[0-9]+ start=[0-9]+ count=[0-9]+ selected=0$' "$range_log" | tail -n 1 || true)"
+  if [[ -n "$range_summary" ]] && grep -q '^MD5 OK: R1 ' "$source_log" && grep -q '^MD5 OK: R2 ' "$source_log"; then
+    source_total="$(sed -E 's/^pair-range total=([0-9]+).*/\1/' <<< "$range_summary")"
+    measured_start="$(sed -E 's/^pair-range total=[0-9]+ start=([0-9]+).*/\1/' <<< "$range_summary")"
+    if (( measured_start >= source_total )); then
+      printf '' | gzip -c > "$candidate_r1"
+      printf '' | gzip -c > "$candidate_r2"
+      echo 0 > "${sample_id}.candidate-pair-count.txt"
+      du -h "$candidate_r1" "$candidate_r2" > "${sample_id}.candidate-fastq-size.txt"
+      {
+        echo "stream_interleaved_fastq=0"
+        echo "pair_range_filter=0"
+        echo "pair_range_filter_raw=${feed_status[1]}"
+        echo "fastp=0"
+        echo "chunked_abismal_screen=0"
+        echo "pair_start=${pair_start}"
+        echo "pair_count=${pair_count}"
+        echo "source_total_pairs=${source_total}"
+        echo "source_eof=1"
+      } > "$status_file"
+      printf '%s\n%s\n' "$candidate_r1" "$candidate_r2"
+      exit 0
+    fi
+  fi
+fi
+
+for code in "${feed_status[@]}"; do
+  if (( code != 0 )); then
+    cat "$status_file" >&2
+    echo "PACE candidate screen failed; inspect ${sample_id}.pace-screen.*.log" >&2
+    exit 1
+  fi
+done
+
+gzip -t "$candidate_r1"
+gzip -t "$candidate_r2"
+r1_lines=$(gzip -cd "$candidate_r1" | wc -l)
+r2_lines=$(gzip -cd "$candidate_r2" | wc -l)
+if (( r1_lines == 0 || r2_lines == 0 || r1_lines % 4 != 0 || r2_lines % 4 != 0 )); then
+  echo "candidate FASTQ record structure is invalid" >&2
+  exit 1
+fi
+if (( r1_lines != r2_lines )); then
+  echo "candidate R1/R2 record counts differ" >&2
+  exit 1
+fi
+
+echo $((r1_lines / 4)) > "${sample_id}.candidate-pair-count.txt"
+du -h "$candidate_r1" "$candidate_r2" > "${sample_id}.candidate-fastq-size.txt"
+printf '%s\n%s\n' "$candidate_r1" "$candidate_r2"

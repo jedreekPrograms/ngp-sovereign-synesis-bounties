@@ -1,0 +1,23 @@
+name: Bounty 1 WGBS v3 WT pilot
+
+# Retired: the staged-source WT pilot repeatedly exhausted the ~6 h hosted
+# runner budget while downloading complete CNCB FASTQs, before Abismal could
+# start. The replacement is bounty1-wgbs-streaming-wt-pilot.yml, which streams
+# the exact source bytes through fastp + the validated Abismal screen while
+# retaining published compressed-source MD5 verification and fail-closed
+# semantics.
+#
+# Keep this workflow manual-only so historical run links remain meaningful and
+# PR synchronizations cannot duplicate WT_rep1 processing.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  retired:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo 'Retired staged WT pilot; use Bounty 1 WGBS streaming WT pilot.'
