@@ -1,4 +1,4 @@
-launch-2026-09-02-sirt3-rep1-part9
-round=SIRT3_rep1_part9
-range=400000000-450000000
-reason=SIRT3_rep1 part8 checkpoint is durable and non-EOF; SIRT3_rep2 part8 is a checksum-verified EOF checkpoint with source_total_pairs=340407824 and must not be rerun. No heavy runs are active. Advance only SIRT3_rep1 with the next strictly non-overlapping 50M shard. Preserve published source MD5 verification, checksum-verified hg19, fail-closed screening including checksum-verified EOF handling, per-sample concurrency, and durable SHA256 checkpoints.
+launch-2026-09-03-sirt3-rep1-part10
+round=SIRT3_rep1_part10
+range=450000000-500000000
+reason=SIRT3_rep1 part9 checkpoint is durable and non-EOF (artifact 1871624434 bytes, digest sha256:1d566bb5ba71e58d3737ba4a35307d707613cc43d8a8b4ccb76d834df8aaca16); SIRT3_rep2 is already at checksum-verified EOF and must not be rerun. No in-progress or queued Actions runs are active. Advance only SIRT3_rep1 with the next strictly non-overlapping 50M shard. Preserve published source MD5 verification, checksum-verified hg19, fail-closed screening including checksum-verified EOF handling, per-sample concurrency, and durable SHA256 checkpoints.
